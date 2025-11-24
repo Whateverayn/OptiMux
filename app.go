@@ -1,10 +1,17 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // MediaInfo は ffprobe から取得したファイル情報を保持
@@ -16,6 +23,13 @@ type MediaInfo struct {
 	// 音声ストリームが存在するか
 	HasAudio bool `json:"hasAudio"`
 	// ファイルサイズ, 時間などのメタデータも後で追加予定
+}
+
+// フロントエンドから受け取る設定
+type EncodeOptions struct {
+	Codec     string `json:"codec"`     // "hevc" | "av1"
+	Audio     string `json:"audio"`     // "copy" | "none"
+	Extension string `json:"extension"` // "mp4"  | "mov"
 }
 
 // App struct
@@ -47,6 +61,8 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	if err != nil {
 		return MediaInfo{}, fmt.Errorf("ffprobeが見つかりません. PATHが通っているか確認してください: %w", err)
 	}
+
+	log.Printf("渡されたファイルパス: %s\n", filePath)
 
 	// ffprobeでストリーム情報を取得するコマンドを組み立てます
 	// -show_streams: ストリーム情報全体を表示
@@ -91,4 +107,91 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	}
 
 	return info, nil
+}
+
+// 動画変換を実行 (非同期で実行され、イベントで進捗を通知)
+func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
+	}
+
+	// 出力パスの生成 (例: input.mov -> input_opt.mov)
+	ext := opts.Extension
+	if ext == "" {
+		ext = "mov"
+	}
+	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + "_" + opts.Codec + "." + ext
+
+	// コマンド組立
+	args := []string{
+		"-i", inputPath,
+	}
+
+	// 映像設定
+	if opts.Codec == "av1" {
+		// SVT-AV1
+		args = append(args, "-c:v", "libsvtav1", "-crf", "32", "-preset", "8")
+	} else {
+		// x265
+		args = append(args, "-c:v", "libx265", "-crf", "23", "-preset", "medium", "-tag:v", "hvc1")
+	}
+
+	// 音声設定
+	if opts.Audio == "none" {
+		args = append(args, "-an")
+	} else {
+		args = append(args, "-c:a", "copy")
+	}
+
+	// メタデータ
+	args = append(args, "-map_metadata", "0")
+
+	// 出力パス
+	args = append(args, outputPath)
+
+	// コマンド実行
+	cmd := exec.Command(ffmpegPath, args...)
+
+	// 標準エラー出力(stderr)をパイプで取得 (FFmpegの進捗はstderrに出る)
+	stderr, _ := cmd.StderrPipe()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// ゴルーチンでログを読み取ってフロントエンドに送信
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+
+		// カスタム分割関数を設定 (\r または \n で分割)
+		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+			if atEOF && len(data) == 0 {
+				return 0, nil, nil
+			}
+			if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+				// \r または \n が見つかったら, そこまでをトークンとして返す
+				return i + 1, data[:i], nil
+			}
+			if atEOF {
+				return len(data), data, nil
+			}
+			return 0, nil, nil
+		})
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			log.Println(line)
+
+			// Wailsのイベント発行: "conversion:log"
+			if len(strings.TrimSpace(line)) > 0 {
+				runtime.EventsEmit(a.ctx, "conversion:log", line)
+			}
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("変換に失敗しました: %w", err)
+	}
+
+	return nil
 }

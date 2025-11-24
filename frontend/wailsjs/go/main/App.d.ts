@@ -4,4 +4,6 @@ import {main} from '../models';
 
 export function AnalyzeMedia(arg1:string):Promise<main.MediaInfo>;
 
+export function ConvertVideo(arg1:string,arg2:main.EncodeOptions):Promise<void>;
+
 export function Greet(arg1:string):Promise<string>;

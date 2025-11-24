@@ -20,6 +20,12 @@ func main() {
 		Title:  "OptiMux",
 		Width:  1024,
 		Height: 768,
+        DragAndDrop: &options.DragAndDrop{
+          EnableFileDrop:       true,
+          DisableWebViewDrop:   true,
+          CSSDropProperty:      "--wails-drop-target",
+          CSSDropValue:         "drop",
+        },
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

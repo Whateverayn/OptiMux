@@ -6,6 +6,10 @@ export function AnalyzeMedia(arg1) {
   return window['go']['main']['App']['AnalyzeMedia'](arg1);
 }
 
+export function ConvertVideo(arg1, arg2) {
+  return window['go']['main']['App']['ConvertVideo'](arg1, arg2);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
