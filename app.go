@@ -9,6 +9,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -22,7 +23,8 @@ type MediaInfo struct {
 	HasVideo bool `json:"hasVideo"`
 	// 音声ストリームが存在するか
 	HasAudio bool `json:"hasAudio"`
-	// ファイルサイズ, 時間などのメタデータも後で追加予定
+	// 時間
+	Duration float64 `json:"duration"`
 }
 
 // フロントエンドから受け取る設定
@@ -70,6 +72,7 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	args := []string{
 		"-v", "error",
 		"-show_streams",
+		"-show_format",
 		"-of", "json",
 		filePath,
 	}
@@ -86,6 +89,9 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 		Streams []struct {
 			CodecType string `json:"codec_type"`
 		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
 	}
 
 	if err := json.Unmarshal(output, &probeResult); err != nil {
@@ -104,6 +110,11 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 		case "audio":
 			info.HasAudio = true
 		}
+	}
+
+	// Duration取得
+	if d, err := strconv.ParseFloat(probeResult.Format.Duration, 64); err == nil {
+		info.Duration = d
 	}
 
 	return info, nil

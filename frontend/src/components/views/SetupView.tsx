@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { MediaInfo } from "../../types.js";
 
 interface Props {
@@ -11,6 +11,14 @@ interface Props {
 }
 
 export default function SetupView({ files, codec, setCodec, audio, setAudio, onStart }: Props) {
+    // 選択中の行番号を管理 (nullなら未選択)
+    const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
+    // 行クリック時のハンドラ
+    const handleRowClick = (index: number) => {
+        setSelectedIndex(index);
+    };
+
     return (
         <div className="flex flex-col h-full gap-4">
 
@@ -34,7 +42,12 @@ export default function SetupView({ files, codec, setCodec, audio, setAudio, onS
                         </thead>
                         <tbody>
                             {files.map((file, i) => (
-                                <tr key={i} className="hover:highlighted ">
+                                <tr
+                                    key={i}
+                                    // 選択中なら highlighted クラスをつける
+                                    className={selectedIndex === i ? "highlighted" : ""}
+                                    onClick={() => handleRowClick(i)}
+                                >
                                     <td className="px-2 py-0.5 text-center">{i + 1}</td>
                                     <td className="px-2 py-0.5 truncate max-w-[200px]">{file.path.split('/').pop()}</td>
                                     <td className="px-2 py-0.5 text-center">{file.hasVideo ? 'Yes' : '-'}</td>
@@ -47,7 +60,7 @@ export default function SetupView({ files, codec, setCodec, audio, setAudio, onS
             </div>
 
             {/* 設定パネル */}
-            <fieldset>
+            <fieldset className="m-2">
                 <legend>Compression Settings</legend>
                 <div className="flex items-end gap-4">
                     <div className="field-row">

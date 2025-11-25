@@ -20,6 +20,7 @@ export namespace main {
 	    path: string;
 	    hasVideo: boolean;
 	    hasAudio: boolean;
+	    duration: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new MediaInfo(source);
@@ -30,6 +31,7 @@ export namespace main {
 	        this.path = source["path"];
 	        this.hasVideo = source["hasVideo"];
 	        this.hasAudio = source["hasAudio"];
+	        this.duration = source["duration"];
 	    }
 	}
 
