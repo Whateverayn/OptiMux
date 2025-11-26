@@ -7,6 +7,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed all:frontend/dist
@@ -27,19 +28,25 @@ func main() {
 			CSSDropProperty:    "--wails-drop-target",
 			CSSDropValue:       "drop",
 		},
-		// Frameless: true,
+		Fullscreen: true,
+		// WindowStartState:         options.Minimised,
+		EnableDefaultContextMenu: true,
+		Frameless:                true,
+		Windows: &windows.Options{
+			DisableFramelessWindowDecorations: true,
+		},
 		Mac: &mac.Options{
 			TitleBar: &mac.TitleBar{
-				TitlebarAppearsTransparent: false,
-				HideTitle:                  false,
-				HideTitleBar:               false,
-				FullSizeContent:            false,
+				TitlebarAppearsTransparent: true,
+				HideTitle:                  true,
+				HideTitleBar:               true,
+				FullSizeContent:            true,
 				UseToolbar:                 false,
 				HideToolbarSeparator:       true,
 			},
 			Appearance:           mac.NSAppearanceNameDarkAqua,
 			WebviewIsTransparent: true,
-			WindowIsTranslucent:  false,
+			WindowIsTranslucent:  true,
 			ContentProtection:    false,
 			About: &mac.AboutInfo{
 				Title:   "My Application",

@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // MediaInfo は ffprobe から取得したファイル情報を保持
@@ -48,6 +51,20 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	go func() {
+		// スプラッシュ
+		time.Sleep(3000 * time.Millisecond)
+
+		// フルスクリーン解除
+		wailsRuntime.WindowUnfullscreen(ctx)
+
+		// 待つ
+		time.Sleep(1 * time.Second)
+
+		// フロントエンドに準備完了を通知
+		wailsRuntime.EventsEmit(ctx, "app:ready")
+	}()
 }
 
 // Greet returns a greeting for the given name
@@ -55,9 +72,91 @@ func (a *App) Greet(name string) string {
 	return fmt.Sprintf("Hello %s, It's show time!", name)
 }
 
+// ヘルパー関数: 一般的なパスを追加する
+func fixPath() {
+	var newPaths []string
+
+	// 実行ファイルの場所を探す
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+
+		// 実行ファイルと同じ場所
+		newPaths = append(newPaths, exeDir)
+		// "bin" サブディレクトリ (OptiMux/bin/ffmpeg とかに置く場合用)
+		newPaths = append(newPaths, filepath.Join(exeDir, "bin"))
+	}
+
+	// シェル
+	if runtime.GOOS != "windows" {
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			if runtime.GOOS == "darwin" {
+				shell = "/bin/zsh"
+			} else {
+				shell = "/bin/bash"
+			}
+		}
+
+		// ログインシェルとして起動し、PATHを出力させる
+		cmd := exec.Command(shell, "-l", "-c", "echo $PATH")
+		output, err := cmd.Output()
+		if err == nil {
+			shellPath := strings.TrimSpace(string(output))
+			if shellPath != "" {
+				// シェルのPATHを分解してリストに追加
+				newPaths = append(newPaths, strings.Split(shellPath, string(os.PathListSeparator))...)
+			}
+		}
+	}
+
+	// 現在のPATHと合体
+	currentPath := os.Getenv("PATH")
+	currentPaths := strings.Split(currentPath, string(os.PathListSeparator))
+
+	// 既存のPATHも後ろに追加 (システム標準のパスを維持)
+	newPaths = append(newPaths, currentPaths...)
+
+	// 重複排除しつつ結合
+	finalPath := joinPathsUnique(newPaths)
+
+	// 環境変数にセット
+	os.Setenv("PATH", finalPath)
+
+	dfinalPath := os.Getenv("PATH")
+	fmt.Println("==========================================")
+	fmt.Println("[DEBUG] Current OS:", runtime.GOOS)
+	fmt.Println("[DEBUG] Executable Path:", os.Args[0])
+	fmt.Println("[DEBUG] Final PATH:", dfinalPath)
+	fmt.Println("==========================================")
+}
+
+// パスリストを重複排除して結合する
+func joinPathsUnique(paths []string) string {
+	seen := make(map[string]bool)
+	var result []string
+
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// パスのクリーニング ( /path/to/./bin -> /path/to/bin )
+		cleanP := filepath.Clean(p)
+
+		if !seen[cleanP] {
+			seen[cleanP] = true
+			result = append(result, cleanP)
+		}
+	}
+
+	return strings.Join(result, string(os.PathListSeparator))
+}
+
 // AnalyzeMedia は指定されたファイルの映像および音声ストリームの有無を ffprobe で判定
 // Wailsのフロントエンドから呼び出される
 func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
+	fixPath()
 	// ffprobeがPATH上にあるか確認
 	ffprobePath, err := exec.LookPath("ffprobe")
 	if err != nil {
@@ -122,6 +221,7 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 
 // 動画変換を実行 (非同期で実行され、イベントで進捗を通知)
 func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
+	fixPath()
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		return fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
@@ -195,7 +295,7 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
 
 			// Wailsのイベント発行: "conversion:log"
 			if len(strings.TrimSpace(line)) > 0 {
-				runtime.EventsEmit(a.ctx, "conversion:log", line)
+				wailsRuntime.EventsEmit(a.ctx, "conversion:log", line)
 			}
 		}
 	}()

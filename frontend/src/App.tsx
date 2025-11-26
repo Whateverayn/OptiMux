@@ -9,6 +9,7 @@ import TitleBar from './components/layout/TitleBar.js';
 import StatusBar from './components/layout/StatusBar.js';
 import SetupView from './components/views/SetupView.js';
 import ProcessingView from './components/views/ProcessingView.js';
+import SplashScreen from './components/views/SplashScreen.js';
 
 // 画面の状態
 type AppView = 'setup' | 'processing';
@@ -27,6 +28,7 @@ function App() {
     const [processing, setProcessing] = useState(false);
     const [log, setLog] = useState<string[]>([]);
     const [isDragging, setIsDragging] = useState(false);
+    const [showSplash, setShowSplash] = useState(true);
 
     // 現在処理中のファイルのインデックスを追跡するRef
     const currentFileIndexRef = useRef<number | null>(null);
@@ -45,6 +47,12 @@ function App() {
 
     // useEffectでWailsのイベントリスナーを登録
     useEffect(() => {
+        // Goからの準備完了合図を待つ
+        const onReady = () => {
+            setShowSplash(false);
+        };
+        EventsOn("app:ready", onReady);
+
         // Wailsからのファイルドロップイベントを受け取るリスナー
         const onFileDrop = async (x: number, y: number, files: string[]) => {
             // 処理中は受け付けない
@@ -122,6 +130,7 @@ function App() {
             EventsOff('wails:drag:enter');
             EventsOff('wails:drag:leave');
             EventsOff("conversion:log");
+            EventsOff("app:ready");
         };
     }, [currentView]); // currentViewが変わるたびに判定
 
@@ -189,6 +198,9 @@ function App() {
 
     return (
         <div className='window w-full h-full flex flex-col'>
+            {/* スプラッシュスクリーンの条件付きレンダリング */}
+            {showSplash && <SplashScreen />}
+
             {/* Header */}
             <TitleBar />
 

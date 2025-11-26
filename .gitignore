@@ -34,3 +34,4 @@ go.work.sum
 build/bin
 node_modules
 frontend/dist
+build/.DS_Store
