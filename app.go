@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -305,4 +306,42 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
 	}
 
 	return nil
+}
+
+// UploadChunk: 分割データを受け取りファイルに追記する
+func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (string, error) {
+	// 保存先: ~/Downloads/OptiMux_Temp
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, "Downloads", "OptiMux_Temp")
+	_ = os.MkdirAll(dir, 0755)
+
+	path := filepath.Join(dir, filename)
+
+	// ファイルを開く (作成 or 追記)
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset == 0 {
+		flags |= os.O_TRUNC // 初回は上書き
+	} else {
+		flags |= os.O_APPEND // 2回目以降は追記
+	}
+
+	f, err := os.OpenFile(path, flags, 0644)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	// Base64デコード
+	payload := dataBase64
+	if idx := strings.Index(dataBase64, ","); idx != -1 {
+		payload = dataBase64[idx+1:]
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return "", err
+	}
+
+	_, err = f.Write(decoded)
+	return path, err
 }
