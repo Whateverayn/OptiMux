@@ -31,7 +31,7 @@ function App() {
     const [showSplash, setShowSplash] = useState(true);
 
     // 現在処理中のファイルのインデックスを追跡するRef
-    const currentFileIndexRef = useRef<number | null>(null);
+    const currentFileIdRef = useRef<string | null>(null);
 
     // ログの自動スクロール用
     const logEndRef = useRef<HTMLDivElement>(null);
@@ -56,11 +56,31 @@ function App() {
         });
     };
 
+    // チャンクサイズを動的に計算する
+    const calculateChunkSize = (fileSize: number): number => {
+        const MB = 1024 * 1024;
+        const MIN_CHUNK = 2 * MB;
+        const MAX_CHUNK = 128 * MB;
+
+        // 基本はファイルサイズの1/10
+        let target = Math.ceil(fileSize / 10);
+
+        // 範囲内に収める
+        if (target < MIN_CHUNK) return MIN_CHUNK;
+        if (target > MAX_CHUNK) return MAX_CHUNK;
+        return target;
+    };
+
     // ファイルを分割してGoにアップロード
-    const uploadFileInChunks = async (file: File): Promise<string> => {
-        const CHUNK_SIZE = 1024 * 1024 * 32; // 32MB
+    const uploadFileInChunks = async (
+        file: File,
+        onProgress: (percent: number) => void
+    ): Promise<string> => {
+        const CHUNK_SIZE = calculateChunkSize(file.size);
         let offset = 0;
         let filePath = "";
+
+        console.log(`📦 Chunk Size for ${file.name}: ${(CHUNK_SIZE / (1024 * 1024)).toFixed(1)} MB`);
 
         while (offset < file.size) {
             const slice = file.slice(offset, offset + CHUNK_SIZE);
@@ -69,7 +89,10 @@ function App() {
             filePath = await UploadChunk(file.name, base64Data, offset);
 
             offset += CHUNK_SIZE;
-            console.log(`Uploading: ${Math.round((offset / file.size) * 100)}%`);
+
+            const percent = Math.min(100, Math.round((offset / file.size) * 100));
+            onProgress(percent);
+            console.log(`Uploading: ${percent}%`);
         }
         return filePath;
     };
@@ -82,30 +105,42 @@ function App() {
         };
         EventsOn("app:ready", onReady);
 
-        // Wailsからのファイルドロップイベントを受け取るリスナー
+        // Wailsからのファイルドロップイベントを受け取るリスナー (除くWindows)
         const onFileDrop = async (x: number, y: number, files: string[]) => {
-            console.log("👺 Wails Drop Event Fired", files);
+            console.log("👺 Wails Drop Event Fired", x, y, files);
+
             // 処理中は受け付けない
             if (currentView !== 'setup') return;
 
-            console.log(x, y, files);
             setIsDragging(false);
 
             // ループ処理
             if (files && files.length > 0) {
-                // files は純粋な string[] なので, そのままループできる
-                const newFiles: MediaInfo[] = [];
+                // IDを発行してリストに追加
+                const newItems: MediaInfo[] = files.map(path => ({
+                    id: crypto.randomUUID(), // ★ここでID発行
+                    path: path,
+                    hasVideo: false,
+                    hasAudio: false,
+                    duration: 0,
+                    status: 'waiting',
+                    progress: 0
+                }));
+                setFileList(prev => [...prev, ...newItems]);
 
-                for (const path of files) {
+                for (const item of newItems) {
                     try {
-                        // Goの関数を呼ぶ
-                        const result = await AnalyzeMedia(path);
-                        newFiles.push(result);
+                        const result = await AnalyzeMedia(item.path);
+                        setFileList(prev => prev.map(f =>
+                            f.id === item.id ? { ...f, ...result } : f
+                        ));
                     } catch (error) {
-                        console.error(`Error analyzing ${path}:`, error);
+                        console.error(`Error analyzing ${item.path}:`, error);
+                        setFileList(prev => prev.map(f =>
+                            f.id === item.id ? { ...f, status: 'error' } : f
+                        ));
                     }
                 }
-                setFileList(prev => [...prev, ...newFiles]);
             } else {
                 console.log("ELSE");
             }
@@ -121,8 +156,8 @@ function App() {
             setLog(prev => [...prev.slice(-100), msg]);
 
             // 現在処理中のファイルがない場合は無視
-            if (currentFileIndexRef.current === null) return;
-            const idx = currentFileIndexRef.current;
+            if (currentFileIdRef.current === null) return;
+            const targetId = currentFileIdRef.current;
 
             // 正規表現で time=XX:XX:XX.XX を探す
             const timeMatch = msg.match(/time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
@@ -132,17 +167,16 @@ function App() {
                 const currentSeconds = parseTimeToSeconds(currentTimeStr);
 
                 setFileList(prevList => {
-                    const newList = [...prevList];
-                    const targetFile = newList[idx];
-
-                    if (targetFile && targetFile.duration > 0) {
-                        // 進捗率計算
-                        const percent = Math.min(100, (currentSeconds / targetFile.duration) * 100);
-
-                        // 状態更新
-                        newList[idx] = { ...targetFile, progress: percent };
-                    }
-                    return newList;
+                    return prevList.map(item => {
+                        // IDが一致するアイテムだけ更新
+                        if (item.id === targetId && item.duration > 0) {
+                            // 進捗率計算
+                            const percent = Math.min(100, (currentSeconds / item.duration) * 100);
+                            // 状態更新
+                            return { ...item, progress: percent };
+                        }
+                        return item;
+                    });
                 });
             }
         };
@@ -179,31 +213,67 @@ function App() {
 
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             const droppedFiles = Array.from(e.dataTransfer.files);
-            const newFiles: MediaInfo[] = [];
 
-            for (const file of droppedFiles) {
+            // 全ファイルの枠を作成してリストに追加
+            const newEntries: MediaInfo[] = droppedFiles.map(file => {
+                const path = (file as any).path || "";
+                return {
+                    id: crypto.randomUUID(), // ★ID発行
+                    path: path,
+                    hasVideo: false,
+                    hasAudio: false,
+                    duration: 0,
+                    // パスがあればwaiting, なければuploading
+                    status: path ? 'waiting' : 'uploading',
+                    progress: 0
+                };
+            });
+
+            // 既存リストの後ろに追加
+            setFileList(prev => [...prev, ...newEntries]);
+
+            // 順次処理
+            for (let i = 0; i < droppedFiles.length; i++) {
+                const file = droppedFiles[i];
+                const entry = newEntries[i]; // 対応するエントリ
+
                 try {
                     // まずパスがあるか確認
-                    let filePath = (file as any).path;
+                    let finalPath = entry.path;
 
                     // パスがない場合 (Windowsなど) は分割アップロードを実行
-                    if (!filePath) {
+                    if (!finalPath) {
                         console.log(`🦔 Streaming ${file.name} to temp storage...`);
-                        filePath = await uploadFileInChunks(file);
-                        console.log("👺 Saved to:", filePath);
+
+                        finalPath = await uploadFileInChunks(file, (percent) => {
+                            // IDを指定して進捗更新
+                            setFileList(prev => prev.map(item =>
+                                item.id === entry.id ? { ...item, progress: percent } : item
+                            ));
+                        });
+                        console.log("👺 Saved to:", finalPath);
                     }
 
-                    // 取得したパス(元のパス or 保存先パス)で解析
-                    if (filePath) {
-                        const result = await AnalyzeMedia(filePath);
-                        newFiles.push(result);
-                    }
+                    // 解析実行
+                    const result = await AnalyzeMedia(finalPath);
+
+                    // IDを指定して結果を反映
+                    setFileList(prev => prev.map(item =>
+                        item.id === entry.id ? {
+                            ...item,
+                            ...result, // 解析結果(Duration等)をマージ
+                            path: finalPath, // 確定したパス
+                            status: 'waiting',
+                            progress: 0
+                        } : item
+                    ));
                 } catch (error) {
                     console.error(`Error processing ${file.name}:`, error);
+                    // IDを指定してエラー状態へ
+                    setFileList(prev => prev.map(item =>
+                        item.id === entry.id ? { ...item, status: 'error' } : item
+                    ));
                 }
-            }
-            if (newFiles.length > 0) {
-                setFileList(prev => [...prev, ...newFiles]);
             }
         }
     };
@@ -217,44 +287,41 @@ function App() {
         setProcessing(true);
         setLog(["Starting process..."]);
 
-        for (let i = 0; i < fileList.length; i++) {
+        // 全ファイルを順次処理
+        for (const item of fileList) {
             // 処理開始前にRefを更新
-            currentFileIndexRef.current = i;
+            currentFileIdRef.current = item.id as any;
+
             // ステータスをProcessingに変更
-            setFileList(prev => {
-                const newList = [...prev];
-                newList[i] = { ...newList[i], status: 'processing', progress: 0 };
-                return newList;
-            });
+            setFileList(prev => prev.map(f =>
+                f.id === item.id ? { ...f, status: 'processing', progress: 0 } : f
+            ));
 
             try {
-                setLog(prev => [...prev, `[INFO] Converting: ${fileList[i].path}...`]);
+                setLog(prev => [...prev, `[INFO] Converting: ${item.path}...`]);
 
-                await ConvertVideo(fileList[i].path, {
+                await ConvertVideo(item.path, {
                     codec: codec,
                     audio: audio,
                     extension: "mp4"
                 });
 
                 // 完了したらDoneにする
-                setFileList(prev => {
-                    const newList = [...prev];
-                    newList[i] = { ...newList[i], status: 'done', progress: 100 };
-                    return newList;
-                });
-                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${fileList[i].path}`]);
+                setFileList(prev => prev.map(f =>
+                    f.id === item.id ? { ...f, status: 'done', progress: 100 } : f
+                ));
+                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
             } catch (error) {
-                setFileList(prev => {
-                    const newList = [...prev];
-                    newList[i] = { ...newList[i], status: 'error' };
-                    return newList;
-                });
-                setLog(prev => [...prev, `>> [ERROR] Failed: ${fileList[i].path} - ${error}`]);
+                // エラー
+                setFileList(prev => prev.map(f =>
+                    f.id === item.id ? { ...f, status: 'error' } : f
+                ));
+                setLog(prev => [...prev, `>> [ERROR] Failed: ${item.path} - ${error}`]);
             }
         }
 
         // 全処理終了
-        currentFileIndexRef.current = null;
+        currentFileIdRef.current = null;
         setProcessing(false);
         setLog(prev => [...prev, "👺 All tasks completed 👹"])
     };
