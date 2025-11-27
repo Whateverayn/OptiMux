@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 
 	"github.com/wailsapp/wails/v2"
@@ -17,19 +18,16 @@ func main() {
 	// Create an instance of the app structure
 	app := NewApp()
 
+	// OSごとのD&D設定を取得 (hook_*.go で定義)
+	dndOptions := getDragAndDropOptions()
+
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "OptiMux",
-		Width:  1024,
-		Height: 768,
-		DragAndDrop: &options.DragAndDrop{
-			EnableFileDrop:     true,
-			DisableWebViewDrop: true,
-			CSSDropProperty:    "--wails-drop-target",
-			CSSDropValue:       "drop",
-		},
-		Fullscreen: true,
-		// WindowStartState:         options.Minimised,
+		Title:                    "OptiMux",
+		Width:                    1024,
+		Height:                   768,
+		Fullscreen:               true,
+		DragAndDrop:              dndOptions,
 		EnableDefaultContextMenu: true,
 		Frameless:                true,
 		Windows: &windows.Options{
@@ -49,15 +47,19 @@ func main() {
 			WindowIsTranslucent:  true,
 			ContentProtection:    false,
 			About: &mac.AboutInfo{
-				Title:   "My Application",
-				Message: "© 2021 Me",
+				Title:   "OptiMux",
+				Message: "© 2025 Me",
 			},
 		},
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
-		OnStartup:        app.startup,
+		OnStartup: func(ctx context.Context) {
+			app.startup(ctx)
+			// OS固有のフック処理を実行 (WindowsならWin32フック, 他は何もしない)
+			setupDragDropHook(ctx)
+		},
 		Bind: []any{
 			app,
 			&MediaInfo{},

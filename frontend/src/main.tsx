@@ -9,10 +9,10 @@ const preventDefault = (e: DragEvent) => {
     e.stopPropagation();
 };
 
-// window.addEventListener('dragenter', preventDefault, false);
-// window.addEventListener('dragover', preventDefault, false);
-// window.addEventListener('dragleave', preventDefault, false);
-// window.addEventListener('drop', preventDefault, false);
+window.addEventListener('dragenter', preventDefault, false);
+window.addEventListener('dragover', preventDefault, false);
+window.addEventListener('dragleave', preventDefault, false);
+window.addEventListener('drop', preventDefault, false);
 
 const container = document.getElementById('root')
 
