@@ -20,6 +20,10 @@ body,
     overflow: hidden;
 }
 
+html, body, #root {
+    --wails-drop-target: drop; 
+}
+
 fieldset {
     border-width: 2px;
     padding: 10px;

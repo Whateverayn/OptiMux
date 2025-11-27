@@ -33,7 +33,7 @@ func main() {
 		EnableDefaultContextMenu: true,
 		Frameless:                true,
 		Windows: &windows.Options{
-			DisableFramelessWindowDecorations: true,
+			DisableFramelessWindowDecorations: false,
 		},
 		Mac: &mac.Options{
 			TitleBar: &mac.TitleBar{

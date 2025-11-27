@@ -4,13 +4,15 @@ import './style.css'
 import App from './App.js'
 import '98.css'
 
-window.addEventListener('dragover', (e) => {
+const preventDefault = (e: DragEvent) => {
     e.preventDefault();
-}, false);
+    e.stopPropagation();
+};
 
-window.addEventListener('drop', (e) => {
-    e.preventDefault();
-}, false);
+// window.addEventListener('dragenter', preventDefault, false);
+// window.addEventListener('dragover', preventDefault, false);
+// window.addEventListener('dragleave', preventDefault, false);
+// window.addEventListener('drop', preventDefault, false);
 
 const container = document.getElementById('root')
 

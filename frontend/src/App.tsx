@@ -55,6 +55,7 @@ function App() {
 
         // Wailsからのファイルドロップイベントを受け取るリスナー
         const onFileDrop = async (x: number, y: number, files: string[]) => {
+            console.log("👺 Wails Drop Event Fired", files);
             // 処理中は受け付けない
             if (currentView !== 'setup') return;
 
