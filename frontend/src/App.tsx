@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo } from "../wailsjs/go/main/App.js";
+import { AnalyzeMedia, ConvertVideo, UploadChunk } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { MediaInfo } from "./types.js";
 
@@ -32,6 +32,10 @@ function App() {
 
     // 現在処理中のファイルのインデックスを追跡するRef
     const currentFileIndexRef = useRef<number | null>(null);
+
+    // ログの自動スクロール用
+    const logEndRef = useRef<HTMLDivElement>(null);
+
     // 時間文字列 (HH:MM:SS.ms) を 秒(number) に変換
     const parseTimeToSeconds = (timeStr: string): number => {
         const parts = timeStr.split(':');
@@ -42,8 +46,33 @@ function App() {
         return (h * 3600) + (m * 60) + s;
     };
 
-    // ログの自動スクロール用
-    const logEndRef = useRef<HTMLDivElement>(null);
+    // BlobをBase64に変換
+    const readFileAsBase64 = (blob: Blob): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    };
+
+    // ファイルを分割してGoにアップロード
+    const uploadFileInChunks = async (file: File): Promise<string> => {
+        const CHUNK_SIZE = 1024 * 1024 * 32; // 32MB
+        let offset = 0;
+        let filePath = "";
+
+        while (offset < file.size) {
+            const slice = file.slice(offset, offset + CHUNK_SIZE);
+            const base64Data = await readFileAsBase64(slice);
+
+            filePath = await UploadChunk(file.name, base64Data, offset);
+
+            offset += CHUNK_SIZE;
+            console.log(`Uploading: ${Math.round((offset / file.size) * 100)}%`);
+        }
+        return filePath;
+    };
 
     // useEffectでWailsのイベントリスナーを登録
     useEffect(() => {
@@ -140,6 +169,45 @@ function App() {
         logEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, [log]);
 
+    // HTML5標準のドロップハンドラ (Windows用)
+    const handleHtmlDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (currentView !== 'setup') return;
+        setIsDragging(false);
+
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const droppedFiles = Array.from(e.dataTransfer.files);
+            const newFiles: MediaInfo[] = [];
+
+            for (const file of droppedFiles) {
+                try {
+                    // まずパスがあるか確認
+                    let filePath = (file as any).path;
+
+                    // パスがない場合 (Windowsなど) は分割アップロードを実行
+                    if (!filePath) {
+                        console.log(`🦔 Streaming ${file.name} to temp storage...`);
+                        filePath = await uploadFileInChunks(file);
+                        console.log("👺 Saved to:", filePath);
+                    }
+
+                    // 取得したパス(元のパス or 保存先パス)で解析
+                    if (filePath) {
+                        const result = await AnalyzeMedia(filePath);
+                        newFiles.push(result);
+                    }
+                } catch (error) {
+                    console.error(`Error processing ${file.name}:`, error);
+                }
+            }
+            if (newFiles.length > 0) {
+                setFileList(prev => [...prev, ...newFiles]);
+            }
+        }
+    };
+
     // 変換実行ボタンの処理
     const startConversion = async () => {
         if (fileList.length === 0) {
@@ -198,7 +266,12 @@ function App() {
     };
 
     return (
-        <div className='window w-full h-full flex flex-col'>
+        <div
+            className='window w-full h-full flex flex-col'
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleHtmlDrop}
+        >
             {/* スプラッシュスクリーンの条件付きレンダリング */}
             {showSplash && <SplashScreen />}
 

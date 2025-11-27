@@ -13,3 +13,7 @@ export function ConvertVideo(arg1, arg2) {
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
+
+export function UploadChunk(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UploadChunk'](arg1, arg2, arg3);
+}
