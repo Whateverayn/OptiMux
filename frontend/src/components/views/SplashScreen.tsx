@@ -23,7 +23,7 @@ export default function SplashScreen() {
                         <p className="text-sm font-bold text-gray-500">Version 1.0.0-rc1</p>
                     </div>
 
-                    <ProgressBar duration={3}></ProgressBar>
+                    <ProgressBar duration={3} className="h-8"></ProgressBar>
                 </div>
             </div>
         </div>

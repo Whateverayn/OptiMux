@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { MediaInfo } from "../../types.js";
+import ProgressBar from '../ui/ProgressBar.js';
 
 interface Props {
     files: MediaInfo[];
@@ -34,7 +35,22 @@ export default function ProcessingView({ files, log, isProcessing, onBack }: Pro
                                 </span>
                             </div>
                             {/* プログレスバー */}
-                            <div className="h-4 border border-gray-500 relative bg-gray-100">
+                            <div className="relative h-5">
+                                <ProgressBar
+                                    value={file.progress}
+                                    className="h-full"
+                                    // ステータスに応じて色を変える
+                                    variant={
+                                        file.status === 'done' ? 'success' :
+                                            file.status === 'error' ? 'error' : 'default'
+                                    }
+                                />
+                                {/* 文字重ね */}
+                                <div className="absolute inset-0 flex items-center justify-center text-[10px] text-white mix-blend-difference pointer-events-none">
+                                    {Math.round(file.progress || 0)}%
+                                </div>
+                            </div>
+                            {/* <div className="h-4 border border-gray-500 relative bg-gray-100">
                                 <div
                                     className={`absolute top-0 left-0 h-full ${file.status === 'error' ? 'bg-red-600' : // エラーなら赤
                                         file.status === 'done' ? 'bg-green-600' : // 完了なら緑
@@ -43,11 +59,10 @@ export default function ProcessingView({ files, log, isProcessing, onBack }: Pro
                                     // 計算した進捗率を適用
                                     style={{ width: `${file.progress || 0}%`, transition: 'width 0.2s' }}
                                 ></div>
-                                {/* バーの中央に文字を置く */}
                                 <div className="absolute w-full text-center text-[10px] leading-4 text-white mix-blend-difference">
                                     {Math.round(file.progress || 0)}%
                                 </div>
-                            </div>
+                            </div> */}
                         </div>
                     ))}
                 </div>

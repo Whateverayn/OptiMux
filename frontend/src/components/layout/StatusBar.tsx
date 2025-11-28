@@ -1,12 +1,13 @@
 import React from 'react';
 import { MediaInfo } from "../../types.js";
+import ProgressBar from '../ui/ProgressBar.js';
 
 interface Props {
     fileList: MediaInfo[];
     isProcessing: boolean;
 }
 
-export default function StatusBar({ fileList, isProcessing }: Props) {
+export default function StatusBar({ fileList = [], isProcessing = false }: Props) {
     // グローバル進捗率の計算
     const totalFiles = fileList.length;
     let globalProgress = 0;
@@ -29,22 +30,16 @@ export default function StatusBar({ fileList, isProcessing }: Props) {
     }
 
     return (
-        <div className="status-bar">
+        
+        <div className="status-bar flex">
             {/* テキスト */}
-            <p className="status-bar-field w-10">{statusText}</p>
+            <div className="status-bar-field !grow-0 px-2 flex items-center">{statusText}</div>
 
             {/* プログレスバー */}
-            <p className="status-bar-field flex-1">
-                <div className="progress-indicator segmented w-full">
-                    <span
-                        className="progress-indicator-bar"
-                        style={{ width: `${globalProgress}%`, transition: 'width 0.2s' }}
-                    ></span>
-                </div>
-            </p>
+            <ProgressBar value={globalProgress} className="status-bar-field grow flex-1 h-full w-full" />
 
             {/* 残り時間 */}
-            <p className="status-bar-field w-10 text-center">--:--</p>
+            <div className="status-bar-field !grow-0 px-2 flex items-center">--:--</div>
         </div>
     );
 }

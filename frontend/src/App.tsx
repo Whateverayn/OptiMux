@@ -367,12 +367,12 @@ function App() {
                         />
                     )}
                 </div>
-
-                {/* Footer */}
-                <StatusBar
-                    fileList={fileList}
-                    isProcessing={processing} />
             </div>
+            {/* Footer */}
+            <StatusBar
+                fileList={fileList}
+                isProcessing={processing}
+            />
         </div>
     )
 }
