@@ -10,6 +10,10 @@ export function ConvertVideo(arg1, arg2) {
   return window['go']['main']['App']['ConvertVideo'](arg1, arg2);
 }
 
+export function GetOSName() {
+  return window['go']['main']['App']['GetOSName']();
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }

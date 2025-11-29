@@ -1,5 +1,8 @@
+// SetupView.tsx
+
 import React, { useState } from "react";
 import { MediaInfo } from "../../types.js";
+import ProgressBar from '../ui/ProgressBar.js';
 
 interface Props {
     files: MediaInfo[];
@@ -58,12 +61,12 @@ export default function SetupView({ files, codec, setCodec, audio, setAudio, onS
                                     {/* アップロード中はプログレスバーを表示 */}
                                     {file.status === 'uploading' ? (
                                         <td colSpan={2} className="px-2 py-0.5 align-middle">
-                                            <div className="relative w-full h-4 border border-gray-600 bg-white">
-                                                <div
-                                                    className="absolute top-0 left-0 h-full bg-yellow-600"
-                                                    style={{ width: `${file.progress}%` }}
-                                                ></div>
-                                                <div className="absolute w-full text-center text-[10px] leading-4 text-black mix-blend-difference">
+                                            {/* 文字を重ねるためのラッパー */}
+                                            <div className="relative w-full h-5">
+                                                <ProgressBar value={file.progress} className="h-full" />
+                                                
+                                                {/* 中央の文字 */}
+                                                <div className="absolute inset-0 flex items-center justify-center text-[10px] text-black mix-blend-difference pointer-events-none">
                                                     Transfer {Math.round(file.progress || 0)}%
                                                 </div>
                                             </div>

@@ -15,6 +15,9 @@ export default function TitleBar() {
     const [isMaximized, setIsMaximized] = useState(false);
     const [platform, setPlatform] = useState<string>("windows");
 
+    // ウィンドウのアクティブ状態管理
+    const [isActive, setIsActive] = useState(true);
+
     useEffect(() => {
         // OS判定
         Environment().then((env) => {
@@ -34,8 +37,18 @@ export default function TitleBar() {
         // ウィンドウのリサイズイベントを監視 (スナップやダブルクリック対策)
         window.addEventListener('resize', updateState);
 
+        // フォーカス監視
+        const handleFocus = () => setIsActive(true);
+        const handleBlur = () => setIsActive(false);
+        window.addEventListener('focus', handleFocus);
+        window.addEventListener('blur', handleBlur);
+
         // クリーンアップ
-        return () => window.removeEventListener('resize', updateState);
+        return () => {
+            window.removeEventListener('resize', updateState);
+            window.removeEventListener('focus', handleFocus);
+            window.removeEventListener('blur', handleBlur);
+        };
     }, []);
 
     // ボタンクリック時のラッパー
@@ -82,7 +95,7 @@ export default function TitleBar() {
 
     return (
         <div
-            className="title-bar"
+            className={`title-bar ${isActive ? '' : 'inactive'}`}
             style={{ "--wails-draggable": "drag" } as React.CSSProperties}
             onDoubleClick={handleMaximizeClick}
         >
