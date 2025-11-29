@@ -88,6 +88,11 @@ func (a *App) Greet(name string) string {
 	return fmt.Sprintf("Hello %s, It's show time!", name)
 }
 
+// GetOSName returns the current operating system name (darwin, windows, linux)
+func (a *App) GetOSName() string {
+    return runtime.GOOS
+}
+
 // ヘルパー関数: 一般的なパスを追加する
 func fixPath() {
 	var newPaths []string

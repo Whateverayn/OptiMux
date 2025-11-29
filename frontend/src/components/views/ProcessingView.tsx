@@ -158,8 +158,8 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
             )}
 
             {/* 進捗リスト */}
-            <div className="flex-1 field-border overflow-y-auto p-2" style={{ padding: '8px' }}>
-                <div className="flex flex-col gap-2">
+            <div className="flex-1 field-border overflow-y-auto p-2">
+                <div className="flex flex-col">
                     {files.map((file, i) => {
                         const isProcessing = file.status === 'processing';
                         const isDone = file.status === 'done';
@@ -169,44 +169,51 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                             <div
                                 key={i}
                                 ref={isProcessing ? processingItemRef : null}
-                                className="flex flex-col gap-1"
+                                className={`
+                                    flex flex-col gap-1 px-2 py-1 status-field-border
+                                    ${isProcessing ? '!bg-[#000080] text-white' : 'text-black'}
+                                `}
                             >
-                                <div className="flex justify-between text-xs">
-                                    <span className="truncate">{getFileName(file.path)}</span>
+                                {/* 上段: ファイル名とステータス */}
+                                <div className="flex justify-between text-xs items-center">
+                                    <span className="truncate font-bold flex items-center gap-1">
+                                        {isProcessing && <span className="animate-pulse">🦔</span>}
+                                        {isDone && <span>👺</span>}
+                                        {isError && <span>💥</span>}
+
+                                        {getFileName(file.path)}
+                                    </span>
                                     <span>
                                         {/* ステータス表示 */}
-                                        {file.status === 'processing' ? 'Processing...' :
-                                            file.status === 'done' ? 'Done' :
-                                                file.status === 'error' ? 'Error' : 'Queued'}
+                                        {isProcessing ? 'Processing...' :
+                                            isDone ? 'Done' :
+                                                isError ? 'Error' : 'Queued'}
                                     </span>
                                 </div>
+
                                 {/* プログレスバー (完了したら結果) */}
-                                {file.status === 'done' ? (
-                                    <div className="text-[10px] text-gray-600 flex justify-between items-center bg-gray-100 px-2 py-1 rounded border border-gray-200">
+                                {isDone ? (
+                                    <div className="pl-4 pr-4 flex flex-wrap gap-x-4 gap-y-0 text-gray-600 text-xs">
                                         {/* 結果情報 */}
-                                        <div className="flex gap-3">
+                                        <div className="">
                                             {/* 時間と速度 */}
-                                            {file.startedAt && file.completedAt ? (
-                                                <span>
-                                                    ⏱️ {formatTime((file.completedAt - file.startedAt) / 1000)}
-                                                    <span className="text-gray-400 ml-1">
-                                                        (x{((file.duration * 1000) / (file.completedAt - file.startedAt)).toFixed(1)})
-                                                    </span>
+                                            TIME: {file.startedAt && file.completedAt ? formatTime((file.completedAt - file.startedAt) / 1000) : '--:--'}
+                                            {file.startedAt && file.completedAt && (
+                                                <span className="ml-1 opacity-70">
+                                                    (x{((file.duration * 1000) / (file.completedAt - file.startedAt)).toFixed(1)})
                                                 </span>
-                                            ) : (
-                                                <span>⏱️ --:--</span>
                                             )}
                                         </div>
 
                                         {/* サイズ変化 */}
-                                        <div className="flex gap-1 items-center font-mono">
-                                            <span>{formatBytes(file.size)}</span>
-                                            <span className="text-gray-400">→</span>
+                                        <div className="flex gap-1">
+                                            <span>SIZE: {formatBytes(file.size)}</span>
+                                            <span className="text-gray-400">{'->'}</span>
                                             <span className="font-bold">{formatBytes(file.encodedSize || 0)}</span>
                                             {(() => {
                                                 const reduction = ((file.size - (file.encodedSize || 0)) / file.size) * 100;
                                                 return (
-                                                    <span className={`ml-1 ${reduction > 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                    <span className="ml-1">
                                                         (▼{reduction.toFixed(0)}%)
                                                     </span>
                                                 );
@@ -215,7 +222,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                                     </div>
                                 ) : (
                                     // 完了以外（Processing / Waiting / Error）
-                                    <div className="relative h-5">
+                                    <div className="relative h-5 mt-0.5">
                                         <ProgressBar
                                             value={file.progress}
                                             className="h-full"
@@ -223,7 +230,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                                             variant={file.status === 'error' ? 'error' : 'default'}
                                         />
                                         {/* 文字重ね */}
-                                        <div className="absolute inset-0 flex items-center justify-center text-[10px] text-white mix-blend-difference pointer-events-none">
+                                        <div className="absolute inset-0 flex items-center justify-center text-xs text-white mix-blend-difference pointer-events-none">
                                             {Math.round(file.progress || 0)}%
                                         </div>
                                     </div>

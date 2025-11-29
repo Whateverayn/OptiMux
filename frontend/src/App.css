@@ -24,6 +24,13 @@ html, body, #root {
     --wails-drop-target: drop; 
 }
 
+body.force-smoothing,
+body.force-smoothing * {
+    /* スムージングを強制的に有効化 */
+    -webkit-font-smoothing: antialiased !important;
+    -moz-osx-font-smoothing: grayscale !important;
+}
+
 fieldset {
     border-width: 2px;
     padding: 10px;

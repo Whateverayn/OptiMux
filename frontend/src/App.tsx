@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo, UploadChunk } from "../wailsjs/go/main/App.js";
+import { AnalyzeMedia, ConvertVideo, UploadChunk, GetOSName } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { MediaInfo, BatchStatus } from "./types.js";
 
@@ -102,6 +102,47 @@ function App() {
         }
         return filePath;
     };
+
+    // 環境判定 (Mac && 非Retina)
+    useEffect(() => {
+        const setupFontSmoothing = async () => {
+            // GoからOS名を取得
+            const os = await GetOSName();
+            if (os !== 'darwin') return; // Mac以外は何もしない
+
+            // スムージングクラスを切り替える関数
+            const updateSmoothing = () => {
+                const isRetina = window.devicePixelRatio >= 2;
+                if (!isRetina) {
+                    // 非Retinaなら強制スムージングON
+                    document.body.classList.add('force-smoothing');
+                    console.log("Non-Retina detected: Smoothing Enabled");
+                } else {
+                    // Retinaなら標準に戻す
+                    document.body.classList.remove('force-smoothing');
+                    console.log("Retina detected: Smoothing Disabled");
+                }
+            };
+
+            // 初回実行
+            updateSmoothing();
+
+            // DPIの変化を監視する (ウィンドウ移動対策)
+            const mq = window.matchMedia('screen and (min-resolution: 2dppx)');
+
+            // モダンブラウザ用リスナー
+            const handleChange = () => updateSmoothing();
+
+            mq.addEventListener("change", handleChange);
+
+            // クリーンアップ
+            return () => {
+                mq.removeEventListener("change", handleChange);
+            };
+        };
+
+        setupFontSmoothing();
+    }, []);
 
     // useEffectでWailsのイベントリスナーを登録
     useEffect(() => {
