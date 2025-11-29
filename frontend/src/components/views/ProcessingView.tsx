@@ -162,6 +162,8 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                 <div className="flex flex-col gap-2">
                     {files.map((file, i) => {
                         const isProcessing = file.status === 'processing';
+                        const isDone = file.status === 'done';
+                        const isError = file.status === 'error';
 
                         return (
                             <div

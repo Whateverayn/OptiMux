@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -23,6 +24,8 @@ import (
 type MediaInfo struct {
 	// ファイルパス
 	Path string `json:"path"`
+	// ファイルサイズ (バイト)
+	Size int64 `json:"size"`
 	// 映像ストリームが存在するか
 	HasVideo bool `json:"hasVideo"`
 	// 音声ストリームが存在するか
@@ -36,6 +39,18 @@ type EncodeOptions struct {
 	Codec     string `json:"codec"`     // "hevc" | "av1"
 	Audio     string `json:"audio"`     // "copy" | "none"
 	Extension string `json:"extension"` // "mp4"  | "mov"
+}
+
+// 変換結果を返すための構造体
+type ConvertResult struct {
+	OutputPath string `json:"outputPath"`
+	Size       int64  `json:"size"`
+}
+
+// フロントエンドに送る進捗データ構造体
+type ProgressEvent struct {
+	TimeSec float64 `json:"timeSec"` // 経過時間 (秒)
+	Size    int64   `json:"size"`    // 現在サイズ (byte)
 }
 
 // App struct
@@ -158,6 +173,13 @@ func joinPathsUnique(paths []string) string {
 // Wailsのフロントエンドから呼び出される
 func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	fixPath()
+
+	// ファイルサイズを取得する
+	fileStat, err := os.Stat(filePath)
+	if err != nil {
+		return MediaInfo{}, fmt.Errorf("ファイル情報の取得に失敗しました: %w", err)
+	}
+
 	// ffprobeがPATH上にあるか確認
 	ffprobePath, err := exec.LookPath("ffprobe")
 	if err != nil {
@@ -200,6 +222,7 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 
 	info := MediaInfo{
 		Path: filePath,
+		Size: fileStat.Size(), // サイズを格納
 	}
 
 	// 映像と音声の有無を判定
@@ -221,11 +244,11 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 }
 
 // 動画変換を実行 (非同期で実行され、イベントで進捗を通知)
-func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
+func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult, error) {
 	fixPath()
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		return fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
+		return ConvertResult{}, fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
 	}
 
 	// 出力パスの生成 (例: input.mov -> input_opt.mov)
@@ -259,20 +282,71 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
 	// メタデータ
 	args = append(args, "-map_metadata", "0")
 
+	// 進捗情報を標準出力(pipe:1)に流す設定
+	// 進捗データ: stdout; ログ: stderr
+	args = append(args, "-progress", "pipe:1", "-nostats")
+
 	// 出力パス
 	args = append(args, outputPath)
 
 	// コマンド実行
 	cmd := exec.Command(ffmpegPath, args...)
 
-	// 標準エラー出力(stderr)をパイプで取得 (FFmpegの進捗はstderrに出る)
-	stderr, _ := cmd.StderrPipe()
+	// パイプの準備
+	stdout, _ := cmd.StdoutPipe() // 進捗データ用
+	stderr, _ := cmd.StderrPipe() // ログテキスト用
+
+	// 標準エラー出力(stderr)をパイプで取得
 	if err := cmd.Start(); err != nil {
-		return err
+		return ConvertResult{}, err
 	}
 
-	// ゴルーチンでログを読み取ってフロントエンドに送信
+	// 並行処理の待機用
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 進捗データ解析 (stdout)
 	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+
+		// key=value 形式の変数を一時保存
+		var currentSize int64 = 0
+		var currentTime float64 = 0
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			// 必要な情報を抽出
+			if key == "total_size" {
+				// バイト単位で来るのでそのまま使える
+				if s, err := strconv.ParseInt(val, 10, 64); err == nil {
+					currentSize = s
+				}
+			} else if key == "out_time_us" {
+				// マイクロ秒で来るので秒に変換
+				if t, err := strconv.ParseFloat(val, 64); err == nil {
+					currentTime = t / 1000000.0
+				}
+			} else if key == "progress" && val == "continue" {
+				// 1フレーム分のデータが揃ったタイミングでイベント送信
+				wailsRuntime.EventsEmit(a.ctx, "conversion:progress", ProgressEvent{
+					TimeSec: currentTime,
+					Size:    currentSize,
+				})
+			}
+		}
+	}()
+
+	// ゴルーチンでログを読み取ってフロントエンドに送信 (stderr)
+	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 
 		// カスタム分割関数を設定 (\r または \n で分割)
@@ -301,11 +375,26 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) error {
 		}
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("変換に失敗しました: %w", err)
+	// コマンド終了とゴルーチンの完了を待つ
+	err = cmd.Wait()
+	wg.Wait()
+
+	if err != nil {
+		return ConvertResult{}, fmt.Errorf("変換に失敗しました: %w", err)
 	}
 
-	return nil
+	// 生成されたファイルの情報を取得して返す
+	fileInfo, err := os.Stat(outputPath)
+	if err != nil {
+		// 変換は成功したがファイルが見つからないケース（稀だが一応）
+		return ConvertResult{}, fmt.Errorf("出力ファイルの確認に失敗しました: %w", err)
+	}
+
+	// 結果を返す
+	return ConvertResult{
+		OutputPath: outputPath,
+		Size:       fileInfo.Size(),
+	}, nil
 }
 
 // UploadChunk: 分割データを受け取りファイルに追記する

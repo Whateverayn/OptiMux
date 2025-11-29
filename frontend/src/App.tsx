@@ -14,6 +14,11 @@ import SplashScreen from './components/views/SplashScreen.js';
 // 画面の状態
 type AppView = 'setup' | 'processing';
 
+type ProgressEvent = {
+    timeSec: number;
+    size: number;
+};
+
 function App() {
     // データ
     const [fileList, setFileList] = useState<MediaInfo[]>([]);
@@ -158,34 +163,55 @@ function App() {
             setLog(prev => [...prev.slice(-100), msg]);
 
             // 現在処理中のファイルがない場合は無視
+            // if (currentFileIdRef.current === null) return;
+            // const targetId = currentFileIdRef.current;
+
+            // 正規表現で time=XX:XX:XX.XX を探す
+            // const match = msg.match(/size=\s*(\d+)kB.*time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
+
+            // if (match) {
+            //     const sizeKb = parseInt(match[1], 10); // KB単位
+            //     const currentTimeStr = match[2];
+            //     const currentSeconds = parseTimeToSeconds(currentTimeStr);
+
+            //     setFileList(prevList => {
+            //         return prevList.map(item => {
+            //             // IDが一致するアイテムだけ更新
+            //             if (item.id === targetId && item.duration > 0) {
+            //                 // 進捗率計算
+            //                 const percent = Math.min(100, (currentSeconds / item.duration) * 100);
+            //                 // 状態更新
+            //                 return {
+            //                     ...item,
+            //                     progress: percent,
+            //                     encodedSize: sizeKb * 1024 // Byteに変換して保存
+            //                 };
+            //             }
+            //             return item;
+            //         });
+            //     });
+            // }
+        };
+
+        // 進捗データ専用のリスナー
+        const onProgress = (data: ProgressEvent) => {
             if (currentFileIdRef.current === null) return;
             const targetId = currentFileIdRef.current;
 
-            // 正規表現で time=XX:XX:XX.XX を探す
-            const match = msg.match(/size=\s*(\d+)kB.*time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
-
-            if (match) {
-                const sizeKb = parseInt(match[1], 10); // KB単位
-                const currentTimeStr = match[2];
-                const currentSeconds = parseTimeToSeconds(currentTimeStr);
-
-                setFileList(prevList => {
-                    return prevList.map(item => {
-                        // IDが一致するアイテムだけ更新
-                        if (item.id === targetId && item.duration > 0) {
-                            // 進捗率計算
-                            const percent = Math.min(100, (currentSeconds / item.duration) * 100);
-                            // 状態更新
-                            return {
-                                ...item,
-                                progress: percent,
-                                encodedSize: sizeKb * 1024 // Byteに変換して保存
-                            };
-                        }
-                        return item;
-                    });
+            setFileList(prevList => {
+                return prevList.map(item => {
+                    if (item.id === targetId && item.duration > 0) {
+                        // 時間から進捗率を計算
+                        const percent = Math.min(100, (data.timeSec / item.duration) * 100);
+                        return {
+                            ...item,
+                            progress: percent,
+                            encodedSize: data.size // Goから正確なバイト数が来る
+                        };
+                    }
+                    return item;
                 });
-            }
+            });
         };
 
         // イベント登録
@@ -193,7 +219,8 @@ function App() {
         EventsOn('wails:drag:enter', onDragEnter);
         EventsOn('wails:drag:leave', onDragLeave);
 
-        EventsOn("conversion:log", onLog);
+        EventsOn("conversion:log", onLog); // ログ用
+        EventsOn("conversion:progress", onProgress); // 数値用
 
         // クリーンアップ (コンポーネント削除時にリスナー解除)
         return () => {
@@ -201,6 +228,7 @@ function App() {
             EventsOff('wails:drag:enter');
             EventsOff('wails:drag:leave');
             EventsOff("conversion:log");
+            EventsOff("conversion:progress");
             EventsOff("app:ready");
         };
     }, [currentView]); // currentViewが変わるたびに判定
@@ -322,7 +350,10 @@ function App() {
             try {
                 setLog(prev => [...prev, `[INFO] Converting: ${item.path}...`]);
 
-                await ConvertVideo(item.path, {
+                // 結果を受け取る
+                // Go側で (ConvertResult, error) を返すよ
+                // JS側では Promise<ConvertResult> が返ってくる
+                const result = await ConvertVideo(item.path, {
                     codec: codec,
                     audio: audio,
                     extension: "mp4"
@@ -334,7 +365,9 @@ function App() {
                         ...f,
                         status: 'done',
                         progress: 100,
-                        completedAt: Date.now() // 終了時刻を記録
+                        completedAt: Date.now(), // 終了時刻を記録
+                        encodedSize: result.size, // 確定したファイルサイズで上書きする
+                        path: result.outputPath, // 確定したパスで上書きする
                     } : f
                 ));
                 setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
