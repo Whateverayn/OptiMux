@@ -382,6 +382,7 @@ function App() {
                     duration: 0,
                     // パスがあればwaiting, なければuploading
                     status: path ? 'waiting' : 'uploading',
+                    isTemp: path ? false : true,
                     progress: 0
                 };
             });
