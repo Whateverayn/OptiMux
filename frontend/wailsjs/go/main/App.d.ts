@@ -4,10 +4,18 @@ import {main} from '../models';
 
 export function AnalyzeMedia(arg1:string):Promise<main.MediaInfo>;
 
+export function CancelDelete(arg1:string):Promise<void>;
+
+export function CheckFileExists(arg1:string):Promise<boolean>;
+
+export function ConfirmDelete(arg1:string):Promise<void>;
+
 export function ConvertVideo(arg1:string,arg2:main.EncodeOptions):Promise<main.ConvertResult>;
 
 export function GetOSName():Promise<string>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function RequestDelete(arg1:string):Promise<string>;
 
 export function UploadChunk(arg1:string,arg2:string,arg3:number):Promise<string>;

@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo, UploadChunk, GetOSName } from "../wailsjs/go/main/App.js";
-import { EventsOn, EventsOff, OnFileDrop } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
+import { AnalyzeMedia, ConvertVideo, UploadChunk, RequestDelete, ConfirmDelete, CancelDelete, GetOSName } from "../wailsjs/go/main/App.js";
+import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { MediaInfo, BatchStatus } from "./types.js";
 
 // Components
 import TitleBar from './components/layout/TitleBar.js';
 import StatusBar from './components/layout/StatusBar.js';
+import FunctionKeyFooter from './components/layout/FunctionKeyFooter.js';
+import DeleteConfirmDialog, { DeleteTarget } from './components/ui/DeleteConfirmDialog.js';
 import SetupView from './components/views/SetupView.js';
 import ProcessingView from './components/views/ProcessingView.js';
 import SplashScreen from './components/views/SplashScreen.js';
@@ -20,8 +22,12 @@ type ProgressEvent = {
 };
 
 function App() {
+    // --- State Definitions ---
     // データ
     const [fileList, setFileList] = useState<MediaInfo[]>([]);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()); // Lift-up: 選択状態
+    const [deleteTargets, setDeleteTargets] = useState<DeleteTarget[] | null>(null); // Lift-up: 削除モーダル状態
+
     const [startTime, setStartTime] = useState<number | null>(null);
 
     // 設定
@@ -41,6 +47,105 @@ function App() {
 
     // ログの自動スクロール用
     const logEndRef = useRef<HTMLDivElement>(null);
+
+    // --- Actions ---
+    // ファイル追加 (重複チェック付き)
+    const addFilesToList = async (newPaths: string[], isTempFile: boolean = false) => {
+        const currentPaths = new Set(fileList.map(f => f.path));
+        const uniquePaths = newPaths.filter(p => !currentPaths.has(p));
+
+        if (uniquePaths.length === 0) return;
+
+        const newItems: MediaInfo[] = uniquePaths.map(path => ({
+            id: crypto.randomUUID(),
+            path: path,
+            size: 0,
+            hasVideo: false, hasAudio: false, duration: 0,
+            status: 'waiting', progress: 0,
+            isTemp: isTempFile // Tempフラグ
+        }));
+
+        setFileList(prev => [...prev, ...newItems]);
+
+        // 解析 (並列実行)
+        for (const item of newItems) {
+            // 非同期で解析を実行
+            AnalyzeMedia(item.path)
+                .then(result => {
+                    // 成功したら結果をマージ
+                    setFileList(prev => prev.map(f =>
+                        f.id === item.id ? { ...f, ...result, status: 'waiting' } : f
+                    ));
+                })
+                .catch(err => {
+                    console.error(err);
+                    // 失敗したらエラー状態に
+                    setFileList(prev => prev.map(f =>
+                        f.id === item.id ? { ...f, status: 'error' } : f
+                    ));
+                });
+        }
+    };
+
+    // 削除フロー開始 (F8 or ボタン)
+    const startBatchDelete = async () => {
+        if (selectedIds.size === 0) return;
+        const filesToDelete = fileList.filter(f => selectedIds.has(f.id));
+
+        // 分類
+        const tempFiles = filesToDelete.filter(f => f.isTemp);
+        const normalFiles = filesToDelete.filter(f => !f.isTemp);
+
+        // 通常ファイル: 即座にリストから削除
+        if (normalFiles.length > 0) {
+            const normalIds = new Set(normalFiles.map(f => f.id));
+            setFileList(prev => prev.filter(f => !normalIds.has(f.id)));
+
+            // 選択解除 (Tempがなければ全解除, あればTemp以外を解除)
+            setSelectedIds(prev => {
+                const next = new Set(prev);
+                normalIds.forEach(id => next.delete(id));
+                return next;
+            });
+        }
+
+        // 一時ファイル: 確認ダイアログへ
+        if (tempFiles.length > 0) {
+            const targets: DeleteTarget[] = [];
+            try {
+                for (const file of tempFiles) {
+                    if (file.path) {
+                        // Windows一時ファイルなら物理削除リクエスト
+                        const token = await RequestDelete(file.path);
+                        targets.push({ file, token });
+                    }
+                }
+                setDeleteTargets(targets); // ダイアログ表示
+            } catch (e) {
+                console.error(e);
+            }
+        }
+    };
+
+    // 削除実行 (Confirm)
+    const confirmBatchDelete = async () => {
+        if (!deleteTargets) return;
+        for (const target of deleteTargets) {
+            if (target.token) await ConfirmDelete(target.token);
+            setFileList(prev => prev.filter(f => f.id !== target.file.id));
+        }
+        setSelectedIds(new Set()); // 選択解除
+        setDeleteTargets(null);    // ダイアログ閉じる
+    };
+
+    // 削除キャンセル
+    const cancelBatchDelete = async () => {
+        if (!deleteTargets) return;
+        for (const target of deleteTargets) {
+            if (target.token) await CancelDelete(target.token);
+        }
+        setDeleteTargets(null);
+    };
 
     // 時間文字列 (HH:MM:SS.ms) を 秒(number) に変換
     const parseTimeToSeconds = (timeStr: string): number => {
@@ -202,36 +307,6 @@ function App() {
         const onLog = (msg: string) => {
             // ログ表示用
             setLog(prev => [...prev.slice(-100), msg]);
-
-            // 現在処理中のファイルがない場合は無視
-            // if (currentFileIdRef.current === null) return;
-            // const targetId = currentFileIdRef.current;
-
-            // 正規表現で time=XX:XX:XX.XX を探す
-            // const match = msg.match(/size=\s*(\d+)kB.*time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
-
-            // if (match) {
-            //     const sizeKb = parseInt(match[1], 10); // KB単位
-            //     const currentTimeStr = match[2];
-            //     const currentSeconds = parseTimeToSeconds(currentTimeStr);
-
-            //     setFileList(prevList => {
-            //         return prevList.map(item => {
-            //             // IDが一致するアイテムだけ更新
-            //             if (item.id === targetId && item.duration > 0) {
-            //                 // 進捗率計算
-            //                 const percent = Math.min(100, (currentSeconds / item.duration) * 100);
-            //                 // 状態更新
-            //                 return {
-            //                     ...item,
-            //                     progress: percent,
-            //                     encodedSize: sizeKb * 1024 // Byteに変換して保存
-            //                 };
-            //             }
-            //             return item;
-            //         });
-            //     });
-            // }
         };
 
         // 進捗データ専用のリスナー
@@ -408,7 +483,7 @@ function App() {
                         progress: 100,
                         completedAt: Date.now(), // 終了時刻を記録
                         encodedSize: result.size, // 確定したファイルサイズで上書きする
-                        path: result.outputPath, // 確定したパスで上書きする
+                        outputPath: result.outputPath, // 出力先
                     } : f
                 ));
                 setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
@@ -453,6 +528,9 @@ function App() {
                     {currentView === 'setup' ? (
                         <SetupView
                             files={fileList}
+                            selectedIds={selectedIds}
+                            onSelectionChange={setSelectedIds}
+                            onDeleteReq={startBatchDelete}
                             codec={codec}
                             setCodec={setCodec}
                             audio={audio}
@@ -469,11 +547,39 @@ function App() {
                     )}
                 </div>
             </div>
+
             {/* Footer */}
+            <FunctionKeyFooter
+                mode={currentView}
+                canRun={fileList.length > 0}
+                canDelete={selectedIds.size > 0}
+                onRun={startConversion}
+                onDelete={startBatchDelete} // F8で発火
+                onBack={() => {
+                    if (currentView === 'processing') {
+                        // 処理画面なら戻る
+                        // (ここで一時ファイルの削除, 処理中止などのクリーンアップを呼ぶ)
+                        setLog([]);
+                        setBatchStatus('idle');
+                        setCurrentView('setup');
+                    } else {
+                        // セットアップ画面ならアプリ終了
+                        Quit();
+                    }
+                }}
+            />
             <StatusBar
                 fileList={fileList}
                 batchStatus={batchStatus}
                 startTime={startTime}
+            />
+
+            {/* Global Modal */}
+            <DeleteConfirmDialog
+                targets={deleteTargets || []}
+                isOpen={!!deleteTargets}
+                onConfirm={confirmBatchDelete}
+                onCancel={cancelBatchDelete}
             />
         </div>
     )

@@ -17,8 +17,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// App struct
+type App struct {
+	ctx              context.Context
+	pendingDeletions map[string]string // [UUID]FilePath
+	mu               sync.Mutex
+}
 
 // MediaInfo は ffprobe から取得したファイル情報を保持
 type MediaInfo struct {
@@ -53,14 +61,11 @@ type ProgressEvent struct {
 	Size    int64   `json:"size"`    // 現在サイズ (byte)
 }
 
-// App struct
-type App struct {
-	ctx context.Context
-}
-
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{
+		pendingDeletions: make(map[string]string),
+	}
 }
 
 // startup is called when the app starts. The context is saved
@@ -90,7 +95,7 @@ func (a *App) Greet(name string) string {
 
 // GetOSName returns the current operating system name (darwin, windows, linux)
 func (a *App) GetOSName() string {
-    return runtime.GOOS
+	return runtime.GOOS
 }
 
 // ヘルパー関数: 一般的なパスを追加する
@@ -438,4 +443,89 @@ func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (str
 
 	_, err = f.Write(decoded)
 	return path, err
+}
+
+// --- ファイル操作, 削除系 API ---
+
+// CheckFileExists: ファイルが存在するか
+func (a *App) CheckFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+// RequestDelete: 削除リクエスト (UUID発行)
+func (a *App) RequestDelete(filePath string) (string, error) {
+	if filePath == "" {
+		return "", fmt.Errorf("パスが空です")
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", fmt.Errorf("ファイルが見つかりません")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	token := uuid.New().String()
+	a.pendingDeletions[token] = filePath
+	return token, nil
+}
+
+// ConfirmDelete: 削除実行 (ゴミ箱へ移動)
+func (a *App) ConfirmDelete(token string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	path, exists := a.pendingDeletions[token]
+	if !exists {
+		return fmt.Errorf("無効な削除トークンです")
+	}
+
+	// OSごとのゴミ箱移動ロジック
+	if err := moveToTrash(path); err != nil {
+		return fmt.Errorf("ゴミ箱への移動に失敗しました: %w", err)
+	}
+
+	delete(a.pendingDeletions, token)
+	return nil
+}
+
+// OSごとのゴミ箱移動コマンドを実行するヘルパー関数
+func moveToTrash(filePath string) error {
+	// 絶対パスに変換 (念のため)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		// macOS: AppleScriptを使ってFinder経由で削除
+		// 'tell application "Finder" to delete POSIX file "/path/to/file"'
+		cmd := exec.Command("osascript", "-e", fmt.Sprintf(`tell application "Finder" to delete POSIX file "%s"`, absPath))
+		return cmd.Run()
+
+	case "windows":
+		// Windows: PowerShellのVisualBasicライブラリを借りる
+		// [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('Path', 'OnlyErrorDialogs', 'SendToRecycleBin')
+		psCommand := fmt.Sprintf(`Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('%s', 'AllDialogs', 'SendToRecycleBin')`, absPath)
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", psCommand)
+		return cmd.Run()
+
+	case "linux":
+		// Linux: gio trash (GNOME系) または kioclient5 (KDE系) など環境による
+		if _, err := exec.LookPath("gio"); err == nil {
+			return exec.Command("gio", "trash", absPath).Run()
+		}
+		return fmt.Errorf("ゴミ箱コマンド(gio)が見つかりませんでした")
+
+	default:
+		return fmt.Errorf("このOSのゴミ箱機能はサポートされていません")
+	}
+}
+
+// CancelDelete: 削除キャンセル (マップから消す)
+func (a *App) CancelDelete(token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pendingDeletions, token)
 }

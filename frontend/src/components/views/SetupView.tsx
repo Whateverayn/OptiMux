@@ -2,10 +2,24 @@
 
 import React, { useState } from "react";
 import { MediaInfo } from "../../types.js";
+import DeleteConfirmDialog, { DeleteTarget } from '../ui/DeleteConfirmDialog.js';
+import { RequestDelete, ConfirmDelete, CancelDelete } from "../../../wailsjs/go/main/App.js";
 import ProgressBar from '../ui/ProgressBar.js';
+
+const formatBytes = (bytes: number): string => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const val = bytes / Math.pow(k, i);
+    return `${val.toPrecision(4)} ${sizes[i]}`;
+};
 
 interface Props {
     files: MediaInfo[];
+    selectedIds: Set<string>; // 親から貰う
+    onSelectionChange: (ids: Set<string>) => void; // 親に通知
+    onDeleteReq: () => void; // 削除ボタン押下時
     codec: string;
     setCodec: (v: string) => void;
     audio: string;
@@ -13,18 +27,38 @@ interface Props {
     onStart: () => void;
 }
 
-export default function SetupView({ files, codec, setCodec, audio, setAudio, onStart }: Props) {
+export default function SetupView({
+    files,
+    selectedIds,
+    onSelectionChange,
+    onDeleteReq,
+    codec,
+    setCodec,
+    audio,
+    setAudio,
+    onStart
+}: Props) {
     // 選択中の行番号を管理 (nullなら未選択)
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
     // 行クリック時のハンドラ
-    const handleRowClick = (index: number) => {
-        setSelectedIndex(index);
+    const handleRowClick = (e: React.MouseEvent, id: string) => {
+        const newSet = new Set(selectedIds);
+
+        if (e.ctrlKey || e.metaKey) {
+            // Ctrlキー または ⌘: 追加/削除 (トグル)
+            if (newSet.has(id)) newSet.delete(id);
+            else newSet.add(id);
+        } else {
+            // 通常クリック: 単一選択
+            newSet.clear();
+            newSet.add(id);
+        }
+        onSelectionChange(newSet);
     };
 
     return (
         <div className="flex flex-col h-full gap-4">
-
             {/* ファイルリスト (D&Dエリア兼用) */}
             <div className={`sunken-panel flex-1 bg-white overflow-auto p-0 ${files.length === 0 ? 'flex items-center justify-center' : ''}`}>
                 {files.length === 0 ? (
@@ -34,51 +68,64 @@ export default function SetupView({ files, codec, setCodec, audio, setAudio, onS
                         <p className="text-xs">(.MOV, .MP4)</p>
                     </div>
                 ) : (
-                    <table className="w-full interactive">
+                    <table className="w-full interactive select-none">
                         <thead>
                             <tr>
                                 <th className="text-center w-8">#</th>
                                 <th className="">Filename</th>
-                                <th className="w-16 text-center">Video</th>
-                                <th className="w-16 text-center">Audio</th>
+                                <th className="text-center">Size</th>
+                                <th className="text-center">Type</th>
+                                <th className="text-center">Video</th>
+                                <th className="text-center">Audio</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {files.map((file, i) => (
-                                <tr
-                                    key={i}
-                                    // 選択中なら highlighted クラスをつける
-                                    className={selectedIndex === i ? "highlighted" : ""}
-                                    onClick={() => handleRowClick(i)}
-                                >
-                                    <td className="px-2 py-0.5 text-center">{i + 1}</td>
+                            {files.map((file, i) => {
+                                const isSelected = selectedIds.has(file.id);
+                                return (
+                                    <tr
+                                        key={file.id}
+                                        // 選択中なら highlighted クラスをつける
+                                        className={isSelected ? "highlighted" : ""}
+                                        onClick={(e) => handleRowClick(e, file.id)}
+                                    >
+                                        <td className="px-2 py-0.5 text-center">{i + 1}</td>
 
-                                    {/* ファイル名表示 */}
-                                    <td className="px-2 py-0.5 truncate max-w-[200px]">
-                                        {file.path.split('/').pop()}
-                                    </td>
-
-                                    {/* アップロード中はプログレスバーを表示 */}
-                                    {file.status === 'uploading' ? (
-                                        <td colSpan={2} className="px-2 py-0.5 align-middle">
-                                            {/* 文字を重ねるためのラッパー */}
-                                            <div className="relative w-full h-5">
-                                                <ProgressBar value={file.progress} className="h-full" />
-                                                
-                                                {/* 中央の文字 */}
-                                                <div className="absolute inset-0 flex items-center justify-center text-[10px] text-black mix-blend-difference pointer-events-none">
-                                                    Transfer {Math.round(file.progress || 0)}%
-                                                </div>
-                                            </div>
+                                        {/* ファイル名表示 */}
+                                        <td className="px-2 py-0.5 truncate max-w-[200px]">
+                                            {file.path.split(/[/\\]/).pop()}
                                         </td>
-                                    ) : (
-                                        <>
-                                            <td className="px-2 py-0.5 text-center">{file.hasVideo ? 'Yes' : '-'}</td>
-                                            <td className="px-2 py-0.5 text-center">{file.hasAudio ? 'Yes' : '-'}</td>
-                                        </>
-                                    )}
-                                </tr>
-                            ))}
+
+                                        {/* アップロード中はプログレスバーを表示 */}
+                                        {file.status === 'uploading' ? (
+                                            <td colSpan={4} className="px-2 py-0.5 align-middle">
+                                                {/* 文字を重ねるためのラッパー */}
+                                                <div className="relative w-full h-5">
+                                                    <ProgressBar value={file.progress} className="h-full" />
+
+                                                    {/* 中央の文字 */}
+                                                    <div className="absolute inset-0 flex items-center justify-center text-[10px] text-black mix-blend-difference pointer-events-none">
+                                                        Transfer {Math.round(file.progress || 0)}%
+                                                    </div>
+                                                </div>
+                                            </td>
+                                        ) : (
+                                            <>
+                                                <td className="text-center px-2">
+                                                    {formatBytes(file.size)}
+                                                </td>
+
+                                                <td className="text-center px-2">
+                                                    {file.isTemp ? 'Temp' : 'Src'}
+                                                </td>
+
+                                                <td className="px-2 py-0.5 text-center">{file.hasVideo ? 'Yes' : '-'}</td>
+                                                <td className="px-2 py-0.5 text-center">{file.hasAudio ? 'Yes' : '-'}</td>
+                                            </>
+                                        )}
+                                    </tr>
+                                )
+                            })}
                         </tbody>
                     </table>
                 )}

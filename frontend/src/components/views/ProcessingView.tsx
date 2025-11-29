@@ -170,7 +170,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                                 key={i}
                                 ref={isProcessing ? processingItemRef : null}
                                 className={`
-                                    flex flex-col gap-1 px-2 py-1 status-field-border
+                                    flex flex-col gap-0 px-2 py-1 status-field-border
                                     ${isProcessing ? '!bg-[#000080] text-white' : 'text-black'}
                                 `}
                             >
