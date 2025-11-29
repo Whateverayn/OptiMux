@@ -1,3 +1,5 @@
+// SetupView.tsx
+
 import React, { useState } from "react";
 import { MediaInfo } from "../../types.js";
 import ProgressBar from '../ui/ProgressBar.js';
@@ -69,17 +71,6 @@ export default function SetupView({ files, codec, setCodec, audio, setAudio, onS
                                                 </div>
                                             </div>
                                         </td>
-                                        // <td colSpan={2} className="px-2 py-0.5 align-middle">
-                                        //     <div className="relative w-full h-4 border border-gray-600 bg-white">
-                                        //         <div
-                                        //             className="absolute top-0 left-0 h-full bg-yellow-600"
-                                        //             style={{ width: `${file.progress}%` }}
-                                        //         ></div>
-                                        //         <div className="absolute w-full text-center text-[10px] leading-4 text-black mix-blend-difference">
-                                        //             Transfer {Math.round(file.progress || 0)}%
-                                        //         </div>
-                                        //     </div>
-                                        // </td>
                                     ) : (
                                         <>
                                             <td className="px-2 py-0.5 text-center">{file.hasVideo ? 'Yes' : '-'}</td>

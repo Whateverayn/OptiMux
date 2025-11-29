@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { AnalyzeMedia, ConvertVideo, UploadChunk } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
-import { MediaInfo } from "./types.js";
+import { MediaInfo, BatchStatus } from "./types.js";
 
 // Components
 import TitleBar from './components/layout/TitleBar.js';
@@ -17,6 +17,7 @@ type AppView = 'setup' | 'processing';
 function App() {
     // データ
     const [fileList, setFileList] = useState<MediaInfo[]>([]);
+    const [startTime, setStartTime] = useState<number | null>(null);
 
     // 設定
     const [codec, setCodec] = useState("hevc");
@@ -25,7 +26,7 @@ function App() {
     // 画面状態
     const [currentView, setCurrentView] = useState<AppView>('setup');
 
-    const [processing, setProcessing] = useState(false);
+    const [batchStatus, setBatchStatus] = useState<BatchStatus>('idle');
     const [log, setLog] = useState<string[]>([]);
     const [isDragging, setIsDragging] = useState(false);
     const [showSplash, setShowSplash] = useState(true);
@@ -118,8 +119,9 @@ function App() {
             if (files && files.length > 0) {
                 // IDを発行してリストに追加
                 const newItems: MediaInfo[] = files.map(path => ({
-                    id: crypto.randomUUID(), // ★ここでID発行
+                    id: crypto.randomUUID(), // ここでID発行
                     path: path,
+                    size: 0,
                     hasVideo: false,
                     hasAudio: false,
                     duration: 0,
@@ -160,10 +162,11 @@ function App() {
             const targetId = currentFileIdRef.current;
 
             // 正規表現で time=XX:XX:XX.XX を探す
-            const timeMatch = msg.match(/time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
+            const match = msg.match(/size=\s*(\d+)kB.*time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
 
-            if (timeMatch) {
-                const currentTimeStr = timeMatch[1];
+            if (match) {
+                const sizeKb = parseInt(match[1], 10); // KB単位
+                const currentTimeStr = match[2];
                 const currentSeconds = parseTimeToSeconds(currentTimeStr);
 
                 setFileList(prevList => {
@@ -173,7 +176,11 @@ function App() {
                             // 進捗率計算
                             const percent = Math.min(100, (currentSeconds / item.duration) * 100);
                             // 状態更新
-                            return { ...item, progress: percent };
+                            return {
+                                ...item,
+                                progress: percent,
+                                encodedSize: sizeKb * 1024 // Byteに変換して保存
+                            };
                         }
                         return item;
                     });
@@ -212,14 +219,20 @@ function App() {
         setIsDragging(false);
 
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            // コピー開始時刻を記録
+            setStartTime(Date.now());
+            // ステータス
+            setBatchStatus('importing');
+
             const droppedFiles = Array.from(e.dataTransfer.files);
 
             // 全ファイルの枠を作成してリストに追加
             const newEntries: MediaInfo[] = droppedFiles.map(file => {
                 const path = (file as any).path || "";
                 return {
-                    id: crypto.randomUUID(), // ★ID発行
+                    id: crypto.randomUUID(), // ID発行
                     path: path,
+                    size: file.size,
                     hasVideo: false,
                     hasAudio: false,
                     duration: 0,
@@ -275,6 +288,8 @@ function App() {
                     ));
                 }
             }
+            setBatchStatus('idle');
+            setStartTime(null);
         }
     };
 
@@ -284,17 +299,24 @@ function App() {
             return;
         }
         setCurrentView('processing');
-        setProcessing(true);
+        setBatchStatus('converting');
         setLog(["Starting process..."]);
+        setStartTime(Date.now()); // 全体の開始時刻
 
         // 全ファイルを順次処理
         for (const item of fileList) {
             // 処理開始前にRefを更新
-            currentFileIdRef.current = item.id as any;
+            currentFileIdRef.current = item.id;
 
             // ステータスをProcessingに変更
             setFileList(prev => prev.map(f =>
-                f.id === item.id ? { ...f, status: 'processing', progress: 0 } : f
+                f.id === item.id ? {
+                    ...f,
+                    status: 'processing',
+                    progress: 0,
+                    startedAt: Date.now(), // ここで刻む
+                    encodedSize: 0
+                } : f
             ));
 
             try {
@@ -308,7 +330,12 @@ function App() {
 
                 // 完了したらDoneにする
                 setFileList(prev => prev.map(f =>
-                    f.id === item.id ? { ...f, status: 'done', progress: 100 } : f
+                    f.id === item.id ? {
+                        ...f,
+                        status: 'done',
+                        progress: 100,
+                        completedAt: Date.now() // 終了時刻を記録
+                    } : f
                 ));
                 setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
             } catch (error) {
@@ -322,7 +349,7 @@ function App() {
 
         // 全処理終了
         currentFileIdRef.current = null;
-        setProcessing(false);
+        setBatchStatus('idle');
         setLog(prev => [...prev, "👺 All tasks completed 👹"])
     };
 
@@ -362,7 +389,7 @@ function App() {
                         <ProcessingView
                             files={fileList}
                             log={log}                               // ログを渡す
-                            isProcessing={processing}               // 状態を渡す
+                            batchStatus={batchStatus}               // 状態を渡す
                             onBack={() => setCurrentView('setup')}
                         />
                     )}
@@ -371,7 +398,8 @@ function App() {
             {/* Footer */}
             <StatusBar
                 fileList={fileList}
-                isProcessing={processing}
+                batchStatus={batchStatus}
+                startTime={startTime}
             />
         </div>
     )
