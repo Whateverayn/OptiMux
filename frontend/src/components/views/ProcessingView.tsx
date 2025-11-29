@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { MediaInfo, BatchStatus } from "../../types.js";
 import ProgressBar from '../ui/ProgressBar.js';
+import FluentDashboard, { DashboardStats } from "./FluentDashboard.js";
 
 interface Props {
     files: MediaInfo[];
@@ -11,14 +12,22 @@ interface Props {
 
 const getFileName = (path: string) => path.split(/[/\\]/).pop() || path;
 
-const reactorStyle = {
-    card: "relative overflow-hidden bg-slate-900 border border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.15)] text-cyan-50 font-mono rounded-none",
-    // スキャンライン演出（背景にうっすら走査線を入れる）
-    scanline: "absolute inset-0 pointer-events-none bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAADCAYAAABS3WWCAAAAE0lEQVQIW2nk5+d/zhCREXiOAQ4A9gUChp3FAI4AAAAASUVORK5CYII=')] opacity-10",
-    label: "text-[10px] uppercase tracking-widest text-cyan-400/70 mb-0.5",
-    value: "text-lg font-bold text-white drop-shadow-[0_0_5px_rgba(255,255,255,0.5)]",
-    barBg: "h-1.5 w-full bg-slate-800 relative overflow-hidden",
-    barFill: "absolute top-0 left-0 h-full bg-gradient-to-r from-cyan-600 via-blue-500 to-purple-500 shadow-[0_0_10px_rgba(6,182,212,0.5)] transition-all duration-300 ease-out"
+// フォーマット関数群
+const formatBytes = (bytes: number) => {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${(bytes / Math.pow(k, i)).toPrecision(4)} ${sizes[i]}`;
+};
+
+const formatTime = (sec: number) => {
+    if (!isFinite(sec) || sec < 0) return "--:--";
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
 export default function ProcessingView({ files, log, batchStatus, onBack }: Props) {
@@ -27,111 +36,125 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
 
     // ログが更新されたら自動スクロール
     useEffect(() => {
-        logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        logEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, [log]);
 
     // 処理中のアイテムへ自動スクロール
     const processingFileId = files.find(f => f.status === 'processing')?.id;
     useEffect(() => {
         if (processingItemRef.current) {
-            processingItemRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+            processingItemRef.current.scrollIntoView({ behavior: "auto", block: "center" });
         }
     }, [processingFileId]);
 
-    // フォーマット関数群
-    const formatBytes = (bytes: number) => {
-        if (bytes === 0) return '0 B';
-        const k = 1024;
-        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return `${(bytes / Math.pow(k, i)).toPrecision(4)} ${sizes[i]}`;
-    };
-
-    const formatTime = (sec: number) => {
-        if (!isFinite(sec) || sec < 0) return "--:--";
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = Math.floor(sec % 60);
-        if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    };
+    let targetFile: MediaInfo | null = null;
+    let targetStats: DashboardStats | null = null;
+    // 終了予想時刻文字列
+    let targetFinishStr = "--:--";
 
     // 現在処理中のファイルを探す
-    const currentFile = files.find(f => f.status === 'processing');
+    const processingFile = files.find(f => f.status === 'processing');
 
-    // --- 予測計算ロジック ---
-    let stats = {
-        encodedSize: 0,
-        predictedSize: 0,
-        reductionRate: 0,
-        elapsed: 0,
-        eta: 0,
-        speed: 0,
-    };
+    // 全て完了しているか判定
+    const isAllDone = files.length > 0 && files.every(f => f.status === 'done');
 
-    if (currentFile && currentFile.startedAt && currentFile.progress && currentFile.progress > 0) {
-        // 経過時間 (秒)
-        stats.elapsed = (Date.now() - currentFile.startedAt) / 1000;
+    if (processingFile) {
+        // 処理中
 
-        // 現在のエンコードサイズ
-        stats.encodedSize = currentFile.encodedSize || 0;
+        targetFile = processingFile;
 
-        // 予測完了サイズ = 現在サイズ / (進捗率 / 100)
-        // ※ 進捗が極端に小さい(1%未満)ときは精度が悪いので計算しない等のガードを入れても良い
-        if (currentFile.progress > 1) {
-            stats.predictedSize = stats.encodedSize / (currentFile.progress / 100);
+        // 予測計算ロジック
+        const stats: DashboardStats = {
+            encodedSize: processingFile.encodedSize || 0,
+            predictedSize: 0,
+            reductionRate: 0,
+            elapsed: 0,
+            eta: 0,
+            speed: 0,
+        };
 
-            // 削減率予測 = (元サイズ - 予測サイズ) / 元サイズ
-            stats.reductionRate = ((currentFile.size - stats.predictedSize) / currentFile.size) * 100;
+        if (processingFile.startedAt && processingFile.progress && processingFile.progress > 0) {
+            // 経過時間 (秒)
+            stats.elapsed = (Date.now() - processingFile.startedAt) / 1000;
+
+            // 予測完了サイズ = 現在サイズ / (進捗率 / 100)
+            // ※ 進捗が極端に小さい(1%未満)ときは精度が悪いので計算しない等のガードを入れても良い
+            if (processingFile.progress > 1) {
+                stats.predictedSize = stats.encodedSize / (processingFile.progress / 100);
+
+                // 削減率予測 = (元サイズ - 予測サイズ) / 元サイズ
+                stats.reductionRate = ((processingFile.size - stats.predictedSize) / processingFile.size) * 100;
+            }
+
+            // 変換スピード (実時間に対する倍速) = 処理した動画時間 / かかった実時間
+            // 処理した動画時間 = 総時間 * 進捗率
+            const processedDuration = processingFile.duration * (processingFile.progress / 100);
+            stats.speed = stats.elapsed > 0 ? processedDuration / stats.elapsed : 0;
+
+            // 残り時間 = (100 - 進捗) / (進捗 / 経過時間)
+            // 単純比例計算
+            const remainingPercent = 100 - processingFile.progress;
+            const timePerPercent = stats.elapsed / processingFile.progress;
+            stats.eta = remainingPercent * timePerPercent;
+
+            if (stats.eta > 0 && isFinite(stats.eta)) {
+                targetFinishStr = new Date(Date.now() + stats.eta * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            }
         }
+        targetStats = stats;
+    } else if (isAllDone) {
+        // 全完了
 
-        // 変換スピード (実時間に対する倍速) = 処理した動画時間 / かかった実時間
-        // 処理した動画時間 = 総時間 * 進捗率
-        const processedDuration = currentFile.duration * (currentFile.progress / 100);
-        stats.speed = stats.elapsed > 0 ? processedDuration / stats.elapsed : 0;
+        // 合計値を計算
+        const totalOriginal = files.reduce((acc, f) => acc + f.size, 0);
+        const totalEncoded = files.reduce((acc, f) => acc + (f.encodedSize || 0), 0);
+        const totalDuration = files.reduce((acc, f) => acc + f.duration, 0); // 動画の総尺
 
-        // 残り時間 = (100 - 進捗) / (進捗 / 経過時間)
-        // 単純比例計算
-        const remainingPercent = 100 - currentFile.progress;
-        const timePerPercent = stats.elapsed / currentFile.progress;
-        stats.eta = remainingPercent * timePerPercent;
+        // 実処理時間の合計 (各ファイルの処理時間の和)
+        const totalElapsed = files.reduce((acc, f) => {
+            if (f.startedAt && f.completedAt) return acc + (f.completedAt - f.startedAt);
+            return acc;
+        }, 0) / 1000;
+
+        // ダミーのMediaInfoを作成して完了画面を表現
+        targetFile = {
+            id: 'summary',
+            path: '👺 All Tasks Completed 👹', // これがタイトルになる
+            size: totalOriginal,
+            hasVideo: true,
+            hasAudio: true,
+            duration: totalDuration,
+            status: 'done',
+            progress: 100, // バーは満タン
+            encodedSize: totalEncoded
+        };
+
+        targetStats = {
+            encodedSize: totalEncoded,
+            predictedSize: totalEncoded, // 完了してるので予測=実績
+            reductionRate: ((totalOriginal - totalEncoded) / totalOriginal) * 100,
+            elapsed: totalElapsed,
+            eta: 0,
+            speed: totalElapsed > 0 ? totalDuration / totalElapsed : 0 // 平均倍速
+        };
+
+        targetFinishStr = "Finished";
     }
 
     return (
         <div className="flex flex-col h-full gap-2">
 
-            {/* ダッシュボード (処理中のファイルがある場合のみ表示) */}
-            {currentFile && (
-                <div className="bg-gray-800 text-white p-3 rounded-md shadow-md text-sm border border-gray-600">
-                    <div className="mb-2 font-bold truncate border-b border-gray-600 pb-1 flex justify-between">
-                        <span>🔨 {getFileName(currentFile.path)}</span>
-                        <span>{Math.round(currentFile.progress || 0)}%</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                        {/* 左カラム: サイズ関連 */}
-                        <div className="flex justify-between">
-                            <span className="text-gray-400">Size:</span>
-                            <span>{formatBytes(stats.encodedSize)} <span className="text-gray-500">/ {formatBytes(stats.predictedSize || 0)}</span></span>
-                        </div>
-                        <div className="flex justify-between">
-                            <span className="text-gray-400">Reduction:</span>
-                            <span className={`${stats.reductionRate > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {stats.predictedSize > 0 ? `▼ ${stats.reductionRate.toFixed(1)}%` : '-- %'}
-                            </span>
-                        </div>
-
-                        {/* 右カラム: 時間・速度関連 */}
-                        <div className="flex justify-between">
-                            <span className="text-gray-400">Time:</span>
-                            <span>{formatTime(stats.elapsed)} <span className="text-gray-500">/ -{formatTime(stats.eta)}</span></span>
-                        </div>
-                        <div className="flex justify-between">
-                            <span className="text-gray-400">Speed:</span>
-                            <span className="font-mono text-yellow-300">x{stats.speed.toFixed(2)}</span>
-                        </div>
-                    </div>
-                </div>
+            {/* ダッシュボード (処理中 または 全完了時に表示) */}
+            {targetFile && targetStats && (
+                <FluentDashboard
+                    currentFile={targetFile}
+                    stats={targetStats}
+                    batchStatus={batchStatus}
+                    finishTimeStr={targetFinishStr}
+                    formatBytes={formatBytes}
+                    formatTime={formatTime}
+                    getFileName={getFileName}
+                />
             )}
 
             {/* 進捗リスト */}
@@ -216,11 +239,11 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                 {log.map((line, i) => (
                     <div key={i} className="whitespace-pre-wrap">{line}</div>
                 ))}
-                {/* <div ref={logEndRef} className="animate-pulse">_</div> */}
+                <div ref={logEndRef} className="animate-pulse">_</div>
             </div>
 
             <button className="oki-btn self-end" onClick={onBack}>
-                Cancel (Debug)
+                {isAllDone ? "Back to Setup" : "Cancel (Debug)"}
             </button>
         </div>
     );

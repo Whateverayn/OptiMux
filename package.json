@@ -1,8 +1,10 @@
 {
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.17"
+    "@tailwindcss/vite": "^4.1.17",
+    "@types/node": "^24.10.1"
   },
   "dependencies": {
+    "@fluentui/react-components": "^9.72.7",
     "98.css": "^0.1.21"
   }
 }
