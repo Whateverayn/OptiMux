@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo, UploadChunk, RequestDelete, ConfirmDelete, CancelDelete, GetOSName } from "../wailsjs/go/main/App.js";
+import { AnalyzeMedia, ConvertVideo, UploadChunk, RequestDelete, ConfirmDelete, CancelDelete, GetOSName, SelectVideoFiles } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { MediaInfo, BatchStatus } from "./types.js";
 
@@ -51,7 +51,7 @@ function App() {
     // --- Actions ---
     // ファイル追加 (重複チェック付き)
     const addFilesToList = async (
-        newPaths: string[], 
+        newPaths: string[],
         isTempFile: boolean = false,
         outputType: 'same' | 'videos' | 'temp' = 'same'
     ) => {
@@ -92,6 +92,21 @@ function App() {
                         f.id === item.id ? { ...f, status: 'error' } : f
                     ));
                 });
+        }
+    };
+
+    // ファイル選択ダイアログを開く
+    const handleOpenFile = async () => {
+        try {
+            // Goのダイアログを呼び出す
+            const files = await SelectVideoFiles();
+            if (files && files.length > 0) {
+                // OSダイアログ経由ならWindowsでも絶対パスが取れる
+                // isTemp: false, outputType: 'same'
+                await addFilesToList(files, false, "same");
+            }
+        } catch (err) {
+            console.error("Failed to select files:", err);
         }
     };
 
@@ -522,6 +537,7 @@ function App() {
                             audio={audio}
                             setAudio={setAudio}
                             onStart={startConversion}
+                            onOpenReq={handleOpenFile}
                         />
                     ) : (
                         <ProcessingView
@@ -539,6 +555,7 @@ function App() {
                 mode={currentView}
                 canRun={fileList.length > 0}
                 canDelete={selectedIds.size > 0}
+                onOpen={handleOpenFile}
                 onRun={startConversion}
                 onDelete={startBatchDelete} // F8で発火
                 onBack={() => {

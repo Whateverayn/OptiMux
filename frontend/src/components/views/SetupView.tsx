@@ -25,6 +25,7 @@ interface Props {
     audio: string;
     setAudio: (v: string) => void;
     onStart: () => void;
+    onOpenReq: () => void;
 }
 
 export default function SetupView({
@@ -36,7 +37,8 @@ export default function SetupView({
     setCodec,
     audio,
     setAudio,
-    onStart
+    onStart,
+    onOpenReq
 }: Props) {
     // 選択中の行番号を管理 (nullなら未選択)
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -62,7 +64,10 @@ export default function SetupView({
             {/* ファイルリスト (D&Dエリア兼用) */}
             <div className={`sunken-panel flex-1 bg-white overflow-auto p-0 ${files.length === 0 ? 'flex items-center justify-center' : ''}`}>
                 {files.length === 0 ? (
-                    <div className="text-center select-none pointer-events-none">
+                    <div
+                        className="text-center select-none pointer-events-none"
+                        onClick={onOpenReq}
+                    >
                         <p className="text-2xl mb-2">📁</p>
                         <p>🌀 DROP 👺 MEDIA 🤩 FILES 🥕 HERE 👹</p>
                         <p className="text-xs">(.MOV, .MP4)</p>

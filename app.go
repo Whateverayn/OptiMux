@@ -512,6 +512,24 @@ func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (str
 
 // --- ファイル操作, 削除系 API ---
 
+// SelectVideoFiles: ファイル選択ダイアログを開く
+func (a *App) SelectVideoFiles() ([]string, error) {
+	selection, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "🍎 Select Media Files 🤖",
+		Filters: []wailsRuntime.FileFilter{
+			{
+				DisplayName: "🐈 Video Files",
+				Pattern:     "*.mov;*.mp4;*.mkv;*.avi;*.webm;*.flv;*.m4v;*.wmv;*.mpg;*.mpeg;*.ts;*.3gp;*.m2ts",
+			},
+			{
+				DisplayName: "👺 All Files",
+				Pattern:     "*.*",
+			},
+		},
+	})
+	return selection, err
+}
+
 // CheckFileExists: ファイルが存在するか
 func (a *App) CheckFileExists(path string) bool {
 	_, err := os.Stat(path)

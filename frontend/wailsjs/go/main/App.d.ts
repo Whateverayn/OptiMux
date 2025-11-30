@@ -18,4 +18,6 @@ export function Greet(arg1:string):Promise<string>;
 
 export function RequestDelete(arg1:string):Promise<string>;
 
+export function SelectVideoFiles():Promise<Array<string>>;
+
 export function UploadChunk(arg1:string,arg2:string,arg3:number):Promise<string>;
