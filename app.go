@@ -53,8 +53,13 @@ type EncodeOptions struct {
 
 // 変換結果を返すための構造体
 type ConvertResult struct {
-	OutputPath string `json:"outputPath"`
-	Size       int64  `json:"size"`
+	Primary   FileResult `json:"primary"`   // メイン出力 (Output A)
+	Secondary FileResult `json:"secondary"` // サブ出力 (Output B, 任意)
+}
+
+type FileResult struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
 }
 
 // フロントエンドに送る進捗データ構造体
@@ -467,8 +472,12 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 
 	// 結果を返す
 	return ConvertResult{
-		OutputPath: finalOutputPath,
-		Size:       fileInfo.Size(),
+		Primary: FileResult{
+			Path: finalOutputPath,
+			Size: fileInfo.Size(),
+		},
+		// Secondary は今回は空 (将来用)
+		Secondary: FileResult{},
 	}, nil
 }
 
