@@ -51,15 +51,44 @@ type EncodeOptions struct {
 	OutputDirType string `json:"outputDirType"` // "same" | "videos" | "downloads" | "temp" (OutputPathが空の場合に使用)
 }
 
+type InputConfig struct {
+	Mode  string   `json:"mode"` // "single" | "concat"
+	Paths []string `json:"paths"`
+}
+
+type OutputConfig struct {
+	Label         string   `json:"label"` // "main", "proxy", "thumbnail" 等の識別子
+	DirType       string   `json:"dirType"`
+	CustomDir     string   `json:"customDir"`
+	NameMode      string   `json:"nameMode"`
+	NameValue     string   `json:"nameValue"`
+	Extension     string   `json:"extension"`
+	FFmpegOptions []string `json:"ffmpegOptions"`
+}
+
+type ProcessRequest struct {
+	FileID        string         `json:"fileId"`
+	Input         InputConfig    `json:"input"`
+	GlobalOptions []string       `json:"globalOptions"`
+	Outputs       []OutputConfig `json:"outputs"`
+}
+
 // 変換結果を返すための構造体
 type ConvertResult struct {
 	Primary   FileResult `json:"primary"`   // メイン出力 (Output A)
 	Secondary FileResult `json:"secondary"` // サブ出力 (Output B, 任意)
 }
 
+// FileResult: 個別のファイル結果
 type FileResult struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
+	Label string `json:"label"` // リクエスト時のLabelをそのまま返す
+	Path  string `json:"path"`
+	Size  int64  `json:"size"`
+}
+
+// ProcessResult: 最終結果リスト
+type ProcessResult struct {
+	Results []FileResult `json:"results"`
 }
 
 // フロントエンドに送る進捗データ構造体
@@ -260,24 +289,17 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	return info, nil
 }
 
-// 動画変換を実行 (非同期で実行され、イベントで進捗を通知)
+// ConvertVideo (レガシー互換用; 動画変換を実行 (非同期で実行され、イベントで進捗を通知))
 func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult, error) {
-	fixPath()
-	ffmpegPath, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return ConvertResult{}, fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
-	}
-
 	var finalOutputPath string
 
-	// 出力パス決定ロジック
+	// 出力パス決定
 	if opts.OutputPath != "" {
 		// 絶対パスが直接指定されている場合
 		finalOutputPath = opts.OutputPath
 		if err := os.MkdirAll(filepath.Dir(finalOutputPath), 0755); err != nil {
 			return ConvertResult{}, fmt.Errorf("出力先ディレクトリ作成失敗: %w", err)
 		}
-
 	} else {
 		// ディレクトリタイプから自動生成
 		var targetDir string
@@ -339,9 +361,7 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 	}
 
 	// コマンド組立
-	args := []string{
-		"-i", inputPath,
-	}
+	args := []string{"-i", inputPath}
 
 	// 映像設定
 	if opts.Codec == "av1" {
@@ -370,113 +390,21 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 	args = append(args, finalOutputPath)
 
 	// コマンド実行
-	cmd := exec.Command(ffmpegPath, args...)
-
-	// パイプの準備
-	stdout, _ := cmd.StdoutPipe() // 進捗データ用
-	stderr, _ := cmd.StderrPipe() // ログテキスト用
-
-	// 標準エラー出力(stderr)をパイプで取得
-	if err := cmd.Start(); err != nil {
-		return ConvertResult{}, err
-	}
-
-	// 並行処理の待機用
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// 進捗データ解析 (stdout)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-
-		// key=value 形式の変数を一時保存
-		var currentSize int64 = 0
-		var currentTime float64 = 0
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(parts[1])
-
-			// 必要な情報を抽出
-			if key == "total_size" {
-				// バイト単位で来るのでそのまま使える
-				if s, err := strconv.ParseInt(val, 10, 64); err == nil {
-					currentSize = s
-				}
-			} else if key == "out_time_us" {
-				// マイクロ秒で来るので秒に変換
-				if t, err := strconv.ParseFloat(val, 64); err == nil {
-					currentTime = t / 1000000.0
-				}
-			} else if key == "progress" && val == "continue" {
-				// 1フレーム分のデータが揃ったタイミングでイベント送信
-				wailsRuntime.EventsEmit(a.ctx, "conversion:progress", ProgressEvent{
-					TimeSec: currentTime,
-					Size:    currentSize,
-				})
-			}
-		}
-	}()
-
-	// ゴルーチンでログを読み取ってフロントエンドに送信 (stderr)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-
-		// カスタム分割関数を設定 (\r または \n で分割)
-		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-			if atEOF && len(data) == 0 {
-				return 0, nil, nil
-			}
-			if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
-				// \r または \n が見つかったら, そこまでをトークンとして返す
-				return i + 1, data[:i], nil
-			}
-			if atEOF {
-				return len(data), data, nil
-			}
-			return 0, nil, nil
-		})
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			log.Println(line)
-
-			// Wailsのイベント発行: "conversion:log"
-			if len(strings.TrimSpace(line)) > 0 {
-				wailsRuntime.EventsEmit(a.ctx, "conversion:log", line)
-			}
-		}
-	}()
-
-	// コマンド終了とゴルーチンの完了を待つ
-	err = cmd.Wait()
-	wg.Wait()
-
-	if err != nil {
+	if err := a.executeFFmpeg(args); err != nil {
 		return ConvertResult{}, fmt.Errorf("変換に失敗しました: %w", err)
 	}
 
-	// 生成されたファイルの情報を取得して返す
+	// 結果返却
 	fileInfo, err := os.Stat(finalOutputPath)
 	if err != nil {
-		// 変換は成功したがファイルが見つからないケース（稀だが一応）
-		return ConvertResult{}, fmt.Errorf("出力ファイルの確認に失敗しました: %w", err)
+		// 変換は成功したがファイルが見つからないケース
+		return ConvertResult{}, fmt.Errorf("出力確認失敗: %w", err)
 	}
 
-	// 結果を返す
 	return ConvertResult{
 		Primary: FileResult{
 			Path: finalOutputPath,
-			Size: fileInfo.Size(),
-		},
-		// Secondary は今回は空 (将来用)
+			Size: fileInfo.Size()},
 		Secondary: FileResult{},
 	}, nil
 }
@@ -620,4 +548,260 @@ func (a *App) CancelDelete(token string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingDeletions, token)
+}
+
+// executeFFmpeg: 引数を受け取って実行し, 進捗とログをイベント送信する
+func (a *App) executeFFmpeg(args []string) error {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
+	}
+
+	cmd := exec.Command(ffmpegPath, args...)
+
+	// パイプの準備
+	stdout, _ := cmd.StdoutPipe() // Progress data (pipe:1)
+	stderr, _ := cmd.StderrPipe() // Log text
+
+	// 標準エラー出力(stderr)をパイプで取得
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// 並行処理の待機用
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 進捗解析 (stdout)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+
+		// key=value 形式の変数を一時保存
+		var currentSize int64 = 0
+		var currentTime float64 = 0
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			// 必要な情報を抽出
+			if key == "total_size" {
+				// バイト単位で来るのでそのまま使える
+				if s, err := strconv.ParseInt(val, 10, 64); err == nil {
+					currentSize = s
+				}
+			} else if key == "out_time_us" {
+				// マイクロ秒で来るので秒に変換
+				if t, err := strconv.ParseFloat(val, 64); err == nil {
+					currentTime = t / 1000000.0
+				}
+			} else if key == "progress" && val == "continue" {
+				// 1フレーム分のデータが揃ったタイミングでイベント送信
+				wailsRuntime.EventsEmit(a.ctx, "conversion:progress", ProgressEvent{
+					TimeSec: currentTime,
+					Size:    currentSize,
+				})
+			}
+		}
+	}()
+
+	// ゴルーチンでログを読み取ってフロントエンドに送信 (stderr)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+
+		// カスタム分割関数を設定 (\r または \n で分割)
+		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+			if atEOF && len(data) == 0 {
+				return 0, nil, nil
+			}
+			if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+				// \r または \n が見つかったら, そこまでをトークンとして返す
+				return i + 1, data[:i], nil
+			}
+			if atEOF {
+				return len(data), data, nil
+			}
+			return 0, nil, nil
+		})
+
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			if len(strings.TrimSpace(line)) > 0 {
+				// Wailsのイベント発行: "conversion:log"
+				wailsRuntime.EventsEmit(a.ctx, "conversion:log", line)
+			}
+		}
+	}()
+
+	// 待機
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+	wg.Wait()
+
+	return nil
+}
+
+// 出力パス解決ロジック (隠蔽)
+func (a *App) resolveOutputPath(cfg OutputConfig, refInputPath string, fileID string) (string, error) {
+	var dir string
+	home, _ := os.UserHomeDir()
+
+	// ディレクトリ決定
+	switch cfg.DirType {
+	case "absolute":
+		dir = cfg.CustomDir
+	case "relative": // 入力ファイルからの相対パス
+		if refInputPath == "" {
+			return "", fmt.Errorf("相対パスの基準となる入力がありません")
+		}
+		dir = filepath.Join(filepath.Dir(refInputPath), cfg.CustomDir)
+	case "video":
+		if runtime.GOOS == "windows" {
+			dir = filepath.Join(home, "Videos", "OptiMux")
+		} else {
+			dir = filepath.Join(home, "Movies", "OptiMux")
+		}
+	case "download":
+		dir = filepath.Join(home, "Downloads", "OptiMux")
+	case "temp":
+		// Temp/OptiMux/Intermediate
+		dir = filepath.Join(os.TempDir(), "OptiMux", "Intermediate")
+	default: // "same" or others
+		if refInputPath == "" {
+			return "", fmt.Errorf("基準入力パスがありません")
+		}
+		dir = filepath.Dir(refInputPath)
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("ディレクトリ作成失敗: %w", err)
+	}
+
+	// 2. ファイル名決定
+	var filename string
+	switch cfg.NameMode {
+	case "uuid":
+		// ランダムな名前
+		filename = uuid.New().String()
+	case "fiid":
+		// ファイルID
+		filename = fileID
+	case "fixed":
+		// 指定された名前そのまま
+		filename = cfg.NameValue
+	case "auto":
+		// 元ファイル名 + Suffix (例: input_hevc)
+		if refInputPath == "" {
+			return "", fmt.Errorf("ファイル名自動生成の基準入力がありません")
+		}
+		base := strings.TrimSuffix(filepath.Base(refInputPath), filepath.Ext(refInputPath))
+		filename = base + cfg.NameValue
+	}
+
+	// 拡張子付与
+	if cfg.Extension != "" {
+		// ドットが含まれていなければ付ける
+		ext := cfg.Extension
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		filename = fmt.Sprintf("%s%s", filename, ext)
+	}
+
+	return filepath.Join(dir, filename), nil
+}
+
+// 汎用処理実行
+func (a *App) RunProcess(req ProcessRequest) (ProcessResult, error) {
+	// 入力準備
+	var finalInputPath string
+	var tempInputFile string
+
+	if req.Input.Mode == "concat" {
+		tempInputFile = filepath.Join(os.TempDir(), fmt.Sprintf("concat_%s.txt", req.FileID))
+		f, err := os.Create(tempInputFile)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+		for _, p := range req.Input.Paths {
+			fmt.Fprintf(f, "file '%s'\n", p)
+		}
+		f.Close()
+		finalInputPath = tempInputFile
+	} else {
+		if len(req.Input.Paths) == 0 {
+			return ProcessResult{}, fmt.Errorf("入力パスがありません")
+		}
+		finalInputPath = req.Input.Paths[0]
+	}
+
+	// 後始末 (deferで確実に消す)
+	if tempInputFile != "" {
+		defer os.Remove(tempInputFile)
+	}
+
+	// 出力パス解決と引数構築
+	args := []string{}
+	if req.Input.Mode == "concat" {
+		args = append(args, "-f", "concat", "-safe", "0")
+	}
+	args = append(args, "-i", finalInputPath)
+	args = append(args, req.GlobalOptions...)
+
+	type targetInfo struct {
+		Path  string
+		Label string
+	}
+	var targets []targetInfo
+	refPath := ""
+	if len(req.Input.Paths) > 0 {
+		refPath = req.Input.Paths[0]
+	}
+
+	for _, outCfg := range req.Outputs {
+		outPath, err := a.resolveOutputPath(outCfg, refPath, req.FileID)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+
+		targets = append(targets, targetInfo{Path: outPath, Label: outCfg.Label})
+		args = append(args, outCfg.FFmpegOptions...)
+		args = append(args, outPath)
+	}
+
+	args = append(args, "-progress", "pipe:1", "-nostats")
+
+	// 実行 (共通関数呼び出し)
+	if err := a.executeFFmpeg(args); err != nil {
+		return ProcessResult{}, fmt.Errorf("変換処理に失敗しました: %w", err)
+	}
+
+	// 4. 結果収集
+	var results []FileResult
+	for _, t := range targets {
+		info, err := os.Stat(t.Path)
+		size := int64(0)
+		if err == nil {
+			size = info.Size()
+		}
+
+		results = append(results, FileResult{
+			Label: t.Label,
+			Path:  t.Path,
+			Size:  size,
+		})
+	}
+
+	return ProcessResult{Results: results}, nil
 }

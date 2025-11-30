@@ -34,6 +34,10 @@ export function RequestDelete(arg1) {
   return window['go']['main']['App']['RequestDelete'](arg1);
 }
 
+export function RunProcess(arg1) {
+  return window['go']['main']['App']['RunProcess'](arg1);
+}
+
 export function SelectVideoFiles() {
   return window['go']['main']['App']['SelectVideoFiles']();
 }

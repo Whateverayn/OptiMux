@@ -1,8 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo, UploadChunk, RequestDelete, ConfirmDelete, CancelDelete, GetOSName, SelectVideoFiles } from "../wailsjs/go/main/App.js";
+import {
+    AnalyzeMedia,
+    ConvertVideo,
+    RunProcess,
+    UploadChunk,
+    RequestDelete,
+    ConfirmDelete,
+    CancelDelete,
+    GetOSName,
+    SelectVideoFiles
+} from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
-import { MediaInfo, BatchStatus } from "./types.js";
+import { createConvertRequest } from "./utils/commandFactory.js";
+import { MediaInfo, BatchStatus, ProcessResult } from "./types.js";
 
 // Components
 import TitleBar from './components/layout/TitleBar.js';
@@ -53,7 +64,7 @@ function App() {
     const addFilesToList = async (
         newPaths: string[],
         isTempFile: boolean = false,
-        outputType: 'same' | 'videos' | 'temp' = 'same'
+        outputType: 'same' | 'video' | 'temp' = 'same'
     ) => {
         const currentPaths = new Set(fileList.map(f => f.path));
         const uniquePaths = newPaths.filter(p => !currentPaths.has(p));
@@ -381,7 +392,7 @@ function App() {
                     // パスがあればwaiting, なければuploading
                     status: path ? 'waiting' : 'uploading',
                     isTemp: path ? false : true,
-                    outputType: 'videos',
+                    outputType: 'video',
                     progress: 0
                 };
             });
@@ -466,15 +477,19 @@ function App() {
             try {
                 setLog(prev => [...prev, `[INFO] Converting: ${item.path}...`]);
 
+                // CommandFactoryを使ってリクエストを作成
+                const request = createConvertRequest(item, {
+                    codec: codec,
+                    audio: audio
+                });
+
                 // 結果を受け取る
                 // Go側で (ConvertResult, error) を返す
-                // JS側では Promise<ConvertResult> が返ってくる
-                const result = await ConvertVideo(item.path, {
-                    codec: codec,
-                    audio: audio,
-                    extension: "mp4",
-                    outputDirType: item.outputType || "same"
-                });
+                // JS側では Promise<ConvertResult> ({ results: FileResult[] })が返ってくる
+                const result = await RunProcess(request);
+
+                // 結果からメイン出力を探す (label="main")
+                const mainOutput = result.results.find((r: { label: string; }) => r.label === 'main');
 
                 // 完了したらDoneにする
                 setFileList(prev => prev.map(f =>
@@ -483,11 +498,11 @@ function App() {
                         status: 'done',
                         progress: 100,
                         completedAt: Date.now(), // 終了時刻を記録
-                        encodedSize: result.primary.size, // 確定したファイルサイズで上書きする
-                        outputPath: result.primary.path, // 出力先
+                        encodedSize: mainOutput ? mainOutput.size : 0, // 確定したファイルサイズで上書きする
+                        outputPath: mainOutput ? mainOutput.path : "", // 出力先
                     } : f
                 ));
-                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
+                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${mainOutput.path}`]);
             } catch (error) {
                 // エラー
                 setFileList(prev => prev.map(f =>
