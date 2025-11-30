@@ -18,6 +18,8 @@ export namespace main {
 	    codec: string;
 	    audio: string;
 	    extension: string;
+	    outputPath: string;
+	    outputDirType: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new EncodeOptions(source);
@@ -28,6 +30,8 @@ export namespace main {
 	        this.codec = source["codec"];
 	        this.audio = source["audio"];
 	        this.extension = source["extension"];
+	        this.outputPath = source["outputPath"];
+	        this.outputDirType = source["outputDirType"];
 	    }
 	}
 	export class MediaInfo {

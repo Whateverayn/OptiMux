@@ -44,9 +44,11 @@ type MediaInfo struct {
 
 // フロントエンドから受け取る設定
 type EncodeOptions struct {
-	Codec     string `json:"codec"`     // "hevc" | "av1"
-	Audio     string `json:"audio"`     // "copy" | "none"
-	Extension string `json:"extension"` // "mp4"  | "mov"
+	Codec         string `json:"codec"`         // "hevc" | "av1"
+	Audio         string `json:"audio"`         // "copy" | "none"
+	Extension     string `json:"extension"`     // "mp4"  | "mov"
+	OutputPath    string `json:"outputPath"`    // 出力先パス (優先)
+	OutputDirType string `json:"outputDirType"` // "same" | "videos" | "downloads" | "temp" (OutputPathが空の場合に使用)
 }
 
 // 変換結果を返すための構造体
@@ -261,12 +263,75 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 		return ConvertResult{}, fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
 	}
 
-	// 出力パスの生成 (例: input.mov -> input_opt.mov)
-	ext := opts.Extension
-	if ext == "" {
-		ext = "mov"
+	var finalOutputPath string
+
+	// 出力パス決定ロジック
+	if opts.OutputPath != "" {
+		// 絶対パスが直接指定されている場合
+		finalOutputPath = opts.OutputPath
+		if err := os.MkdirAll(filepath.Dir(finalOutputPath), 0755); err != nil {
+			return ConvertResult{}, fmt.Errorf("出力先ディレクトリ作成失敗: %w", err)
+		}
+
+	} else {
+		// ディレクトリタイプから自動生成
+		var targetDir string
+		var forceFileName string // 特定条件でファイル名を強制する場合に使用
+
+		home, _ := os.UserHomeDir()
+
+		switch opts.OutputDirType {
+		case "videos":
+			// ~Movies/OptiMux
+			if runtime.GOOS == "windows" {
+				targetDir = filepath.Join(home, "Videos", "OptiMux")
+			} else {
+				targetDir = filepath.Join(home, "Movies", "OptiMux")
+			}
+		case "downloads":
+			// ~Downloads/OptiMux
+			targetDir = filepath.Join(home, "Downloads", "OptiMux")
+		case "temp":
+			// OS一時フォルダ/OptiMux/Intermediate (自動削除対象の集積所)
+			targetDir = filepath.Join(os.TempDir(), "OptiMux", "Intermediate")
+
+			// ファイル名をUUIDにする
+			newID := uuid.New().String()
+			ext := opts.Extension
+			if ext == "" {
+				ext = "mp4"
+			} // デフォルト拡張子
+			forceFileName = fmt.Sprintf("%s.%s", newID, ext)
+		case "same":
+			// 入力ファイルと同じ場所 (デフォルト)
+			targetDir = filepath.Dir(inputPath)
+		default:
+			// 未指定の場合も入力と同じ場所
+			targetDir = filepath.Dir(inputPath)
+		}
+
+		// ディレクトリ作成
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return ConvertResult{}, fmt.Errorf("出力ディレクトリ作成失敗: %w", err)
+		}
+
+		// 最終的な出力パスの結合
+		if forceFileName != "" {
+			// UUIDファイル名を使用 (Tempの場合)
+			finalOutputPath = filepath.Join(targetDir, forceFileName)
+		} else {
+			// ファイル名生成 (input.mov -> input_hevc.mov)
+			originalName := filepath.Base(inputPath)
+			ext := opts.Extension
+			if ext == "" {
+				ext = "mov"
+			}
+			baseName := strings.TrimSuffix(originalName, filepath.Ext(originalName))
+			outputName := fmt.Sprintf("%s_%s.%s", baseName, opts.Codec, ext)
+
+			finalOutputPath = filepath.Join(targetDir, outputName)
+		}
 	}
-	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + "_" + opts.Codec + "." + ext
 
 	// コマンド組立
 	args := []string{
@@ -297,7 +362,7 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 	args = append(args, "-progress", "pipe:1", "-nostats")
 
 	// 出力パス
-	args = append(args, outputPath)
+	args = append(args, finalOutputPath)
 
 	// コマンド実行
 	cmd := exec.Command(ffmpegPath, args...)
@@ -394,7 +459,7 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 	}
 
 	// 生成されたファイルの情報を取得して返す
-	fileInfo, err := os.Stat(outputPath)
+	fileInfo, err := os.Stat(finalOutputPath)
 	if err != nil {
 		// 変換は成功したがファイルが見つからないケース（稀だが一応）
 		return ConvertResult{}, fmt.Errorf("出力ファイルの確認に失敗しました: %w", err)
@@ -402,16 +467,16 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 
 	// 結果を返す
 	return ConvertResult{
-		OutputPath: outputPath,
+		OutputPath: finalOutputPath,
 		Size:       fileInfo.Size(),
 	}, nil
 }
 
 // UploadChunk: 分割データを受け取りファイルに追記する
 func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (string, error) {
-	// 保存先: ~/Downloads/OptiMux_Temp
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, "Downloads", "OptiMux_Temp")
+	// 保存先: os.TempDir()/OptiMux/Imports
+	tempRoot := os.TempDir()
+	dir := filepath.Join(tempRoot, "OptiMux", "Imports")
 	_ = os.MkdirAll(dir, 0755)
 
 	path := filepath.Join(dir, filename)

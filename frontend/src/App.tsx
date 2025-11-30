@@ -50,7 +50,11 @@ function App() {
 
     // --- Actions ---
     // ファイル追加 (重複チェック付き)
-    const addFilesToList = async (newPaths: string[], isTempFile: boolean = false) => {
+    const addFilesToList = async (
+        newPaths: string[], 
+        isTempFile: boolean = false,
+        outputType: 'same' | 'videos' | 'temp' = 'same'
+    ) => {
         const currentPaths = new Set(fileList.map(f => f.path));
         const uniquePaths = newPaths.filter(p => !currentPaths.has(p));
 
@@ -60,9 +64,13 @@ function App() {
             id: crypto.randomUUID(),
             path: path,
             size: 0,
-            hasVideo: false, hasAudio: false, duration: 0,
-            status: 'waiting', progress: 0,
-            isTemp: isTempFile // Tempフラグ
+            hasVideo: false,
+            hasAudio: false,
+            duration: 0,
+            status: 'waiting',
+            progress: 0,
+            isTemp: isTempFile, // Tempフラグ
+            outputType: outputType
         }));
 
         setFileList(prev => [...prev, ...newItems]);
@@ -268,32 +276,7 @@ function App() {
 
             // ループ処理
             if (files && files.length > 0) {
-                // IDを発行してリストに追加
-                const newItems: MediaInfo[] = files.map(path => ({
-                    id: crypto.randomUUID(), // ここでID発行
-                    path: path,
-                    size: 0,
-                    hasVideo: false,
-                    hasAudio: false,
-                    duration: 0,
-                    status: 'waiting',
-                    progress: 0
-                }));
-                setFileList(prev => [...prev, ...newItems]);
-
-                for (const item of newItems) {
-                    try {
-                        const result = await AnalyzeMedia(item.path);
-                        setFileList(prev => prev.map(f =>
-                            f.id === item.id ? { ...f, ...result } : f
-                        ));
-                    } catch (error) {
-                        console.error(`Error analyzing ${item.path}:`, error);
-                        setFileList(prev => prev.map(f =>
-                            f.id === item.id ? { ...f, status: 'error' } : f
-                        ));
-                    }
-                }
+                await addFilesToList(files, false, 'same');
             } else {
                 console.log("ELSE");
             }
@@ -383,6 +366,7 @@ function App() {
                     // パスがあればwaiting, なければuploading
                     status: path ? 'waiting' : 'uploading',
                     isTemp: path ? false : true,
+                    outputType: 'videos',
                     progress: 0
                 };
             });
@@ -473,7 +457,8 @@ function App() {
                 const result = await ConvertVideo(item.path, {
                     codec: codec,
                     audio: audio,
-                    extension: "mp4"
+                    extension: "mp4",
+                    outputDirType: item.outputType || "same"
                 });
 
                 // 完了したらDoneにする
