@@ -1,24 +1,39 @@
 // types.ts
 
+export type TaskType = 'convert' | 'concat' | 'trash';
+
 export interface MediaInfo {
     id: string; // UUID
     path: string; // Goのjsonタグに合わせて小文字
+    inputPaths?: string[]; // Concatのとき [temp1, temp2...]
+    taskType: TaskType; // タスクの種類
+    processRequest?: ProcessRequest; // 実行パラメータ (レシピ生成時に確定させる)
     size: number; // ファイルサイズ (byte)
     hasVideo: boolean;
     hasAudio: boolean;
     duration: number; // 総時間 (秒)
     progress?: number; // 現在の進捗率 (0-100)
-    status?: 'waiting' | 'uploading' | 'processing' | 'done' | 'error'; // 状態管理用
+    status?: 'waiting' | 'uploading' | 'processing' | 'done' | 'error' | 'skipped'; // 状態管理用
+    dependencyRefs?: string[]; // concatタスクの場合: "ref:{parentTaskId}" を入れる
     isTemp?: boolean; // Windows一時ファイルフラグ
 
     // 結果格納用
     encodedSize?: number; // ffmpegが吐き出した現在のファイルサイズ (KB単位想定)
+    outputType?: 'same' | 'video' | 'download' | 'temp';
     outputPath?: string; // 変換後のパス
+    tempOutputPath?: string;
     startedAt?: number;   // このファイルの処理開始時刻 (Date.now())
     completedAt?: number; // 処理終了時刻
+    timeScale?: number; // 時間圧縮率 (デフォルトは 1.0)
+}
 
-    // UI用の設定保持 (リスト個別に設定を変える場合用)
-    outputType?: 'same' | 'video' | 'download' | 'temp';
+// レシピの定義
+export interface Recipe {
+    id: string;
+    name: string;
+    description: string;
+    // レシピごとのパラメータ設定UIが必要ならここに定義
+    defaultParams: Record<string, any>;
 }
 
 // バッチ処理全体のステータス

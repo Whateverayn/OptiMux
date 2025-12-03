@@ -5,36 +5,101 @@ interface Props {
     onDelete?: () => void;
     onBack?: () => void;
     onOpen?: () => void;
+    onRunAdv?: () => void;
     canRun: boolean;
     canDelete: boolean;
     mode: 'setup' | 'processing';
 }
 
-export default function FunctionKeyFooter({ onRun, onDelete, onBack, onOpen, canRun, canDelete, mode }: Props) {
+export default function FunctionKeyFooter({ onRun, onDelete, onBack, onOpen, onRunAdv, canRun, canDelete, mode }: Props) {
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            // モーダル表示中は操作させない等の制御が必要ならここに
+            if (document.querySelector('.modal-open')) return;
+
+            if (mode === 'setup') {
+                switch (e.key) {
+                    case 'F3':
+                        e.preventDefault();
+                        onOpen?.();
+                        break;
+                    case 'F5':
+                        if (canRun) {
+                            e.preventDefault();
+                            onRun?.();
+                        } break;
+                    case 'F6':
+                        if (canRun) {
+                            e.preventDefault();
+                            onRunAdv?.();
+                        } break;
+                    case 'F8':
+                        if (canDelete) {
+                            e.preventDefault();
+                            onDelete?.();
+                        } break;
+                }
+            }
             switch (e.key) {
-                case 'F3': if (mode === 'setup' && onOpen) { e.preventDefault(); onOpen(); } break;
-                case 'F5': if (mode === 'setup' && canRun && onRun) { e.preventDefault(); onRun(); } break;
-                case 'F8': if (mode === 'setup' && canDelete && onDelete) { e.preventDefault(); onDelete(); } break;
-                case 'F12': if (onBack) { e.preventDefault(); onBack(); } break;
+                case 'F1':
+                    e.preventDefault();
+                    // onHelp?.();
+                    break;
+                case 'F12':
+                    e.preventDefault();
+                    onBack?.();
+                    break;
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [onRun, onDelete, onBack, onOpen, canRun, canDelete, mode]);
 
+    // ボタン描画用サブコンポーネント
+    const FooterBtn = ({
+        fKey, label, onClick, disabled, active = false
+    }: {
+        fKey: string, label: string, onClick?: () => void, disabled?: boolean, active?: boolean
+    }) => {
+        return (
+            <button
+                onClick={onClick}
+                disabled={disabled}
+                className="flex-1 text-left font-bold truncate !px-1"
+            >
+                {/* Fキー部分は赤文字 (無効時はグレー) */}
+                <span className={`mr-0.5 ${disabled ? 'text-gray-400' : 'text-red-800'}`}>
+                    {fKey}
+                </span>
+                {label}
+            </button>
+        );
+    };
+
+    // スペーサー (グループ分け用)
+    const Spacer = () => <div className="w-2 shrink-0"></div>;
+
     return (
-        <div className="mt-auto border-t border-white pt-1 bg-gray-200 select-none">
-            <div className="flex gap-1 p-1 bg-gray-200 text-xs font-bold font-mono">
-                <button className="flex-1 px-2 py-1 min-w-0 truncate text-left border-2 border-gray-400 bg-gray-300 text-gray-500 shadow-none"><span className="text-red-800 mr-1">F1</span>Help</button>
-                <button onClick={onOpen} disabled={mode !== 'setup'} className={`flex-1 px-2 py-1 min-w-0 truncate text-left border-2 ${mode === 'setup' ? 'border-gray-600 bg-gray-100 hover:bg-white active:border-gray-800 active:bg-gray-200' : 'border-gray-300 bg-gray-200 text-gray-400 shadow-none'}`}><span className="text-red-800 mr-1">F3</span>Open</button>
-                <div className="flex-[0.5]"></div>
-                <button onClick={onRun} disabled={!canRun || mode !== 'setup'} className={`flex-1 px-2 py-1 min-w-0 truncate text-left border-2 ${canRun && mode === 'setup' ? 'border-gray-600 bg-gray-100' : 'border-gray-300 bg-gray-200 text-gray-400 shadow-none'}`}><span className="text-red-800 mr-1">F5</span>Run</button>
-                <button onClick={onDelete} disabled={!canDelete || mode !== 'setup'} className={`flex-1 px-2 py-1 min-w-0 truncate text-left border-2 ${canDelete && mode === 'setup' ? 'border-gray-600 bg-gray-100' : 'border-gray-300 bg-gray-200 text-gray-400 shadow-none'}`}><span className="text-red-800 mr-1">F8</span>Trash</button>
-                <div className="flex-[0.5]"></div>
-                <button onClick={onBack} className="flex-1 px-2 py-1 min-w-0 truncate text-left border-2 border-gray-600 bg-gray-100"><span className="text-red-800 mr-1">F12</span>{mode === 'setup' ? 'Exit' : 'Back'}</button>
+        <div className="select-none status-bar">
+            <div className="flex status-bar-field">
+                {/* General */}
+                <FooterBtn fKey="F1" label="Help" disabled={true} />
+                <FooterBtn fKey="F2" label="" disabled={true} />
+                <FooterBtn fKey="F3" label="Open" disabled={mode !== 'setup'} onClick={onOpen} />
+                <FooterBtn fKey="F4" label="" disabled={true} />
+            </div>
+            <div className='status-bar-field flex'>
+                {/* Action */}
+                <FooterBtn fKey="F5" label="Run" disabled={mode !== 'setup' || !canRun} onClick={onRun} />
+                <FooterBtn fKey="F6" label="Adv.Run" disabled={mode !== 'setup' || !canRun} onClick={onRunAdv} />
+                <FooterBtn fKey="F7" label="" disabled={true} />
+                <FooterBtn fKey="F8" label="Trash" disabled={mode !== 'setup' || !canDelete} onClick={onDelete} />
+            </div>
+            <div className='status-bar-field flex'>
+                {/* System */}
+                <FooterBtn fKey="F9" label="" disabled={true} />
+                <FooterBtn fKey="F10" label="" disabled={true} />
+                <FooterBtn fKey="F11" label="" disabled={true} />
+                <FooterBtn fKey="F12" label={mode === 'setup' ? 'Exit' : 'Back'} onClick={onBack} />
             </div>
         </div>
     );

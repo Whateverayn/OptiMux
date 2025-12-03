@@ -26,6 +26,7 @@ interface Props {
     setAudio: (v: string) => void;
     onStart: () => void;
     onOpenReq: () => void;
+    onOpenRecipeDialog?: () => void;
 }
 
 export default function SetupView({
@@ -38,7 +39,8 @@ export default function SetupView({
     audio,
     setAudio,
     onStart,
-    onOpenReq
+    onOpenReq,
+    onOpenRecipeDialog
 }: Props) {
     // 選択中の行番号を管理 (nullなら未選択)
     const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -161,6 +163,14 @@ export default function SetupView({
                         disabled={files.length === 0 || files.some(f => f.status === 'uploading')}
                     >
                         💥 Run 📣
+                    </button>
+                    <button
+                        className="field-row"
+                        onClick={onOpenRecipeDialog}
+                        disabled={files.length === 0}
+                        title="Open Advanced Tasks"
+                    >
+                        🌵 Advanced Run...
                     </button>
                 </div>
             </fieldset>

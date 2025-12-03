@@ -13,13 +13,16 @@ import {
 } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { createConvertRequest } from "./utils/commandFactory.js";
-import { MediaInfo, BatchStatus, ProcessResult } from "./types.js";
+import { generateDualFFTasks } from "./utils/recipes/dualff.js";
+import { generateNormalTasks } from "./utils/recipes/normal.js";
+import { MediaInfo, BatchStatus, ProcessResult, ProcessRequest } from "./types.js";
 
 // Components
 import TitleBar from './components/layout/TitleBar.js';
 import StatusBar from './components/layout/StatusBar.js';
 import FunctionKeyFooter from './components/layout/FunctionKeyFooter.js';
 import DeleteConfirmDialog, { DeleteTarget } from './components/ui/DeleteConfirmDialog.js';
+import RecipeSelectDialog from './components/ui/RecipeSelectDialog.js';
 import SetupView from './components/views/SetupView.js';
 import ProcessingView from './components/views/ProcessingView.js';
 import SplashScreen from './components/views/SplashScreen.js';
@@ -34,24 +37,32 @@ type ProgressEvent = {
 
 function App() {
     // --- State Definitions ---
-    // データ
+    // データソース (Setup用)
     const [fileList, setFileList] = useState<MediaInfo[]>([]);
+    // タスクリスト (Processing用)
+    const [taskList, setTaskList] = useState<MediaInfo[]>([]);
+
+    // 選択状態
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()); // Lift-up: 選択状態
     const [deleteTargets, setDeleteTargets] = useState<DeleteTarget[] | null>(null); // Lift-up: 削除モーダル状態
 
     const [startTime, setStartTime] = useState<number | null>(null);
+    const [isRecipeOpen, setIsRecipeOpen] = useState(false);
 
-    // 設定
+    // 設定 (通常)
     const [codec, setCodec] = useState("hevc");
     const [audio, setAudio] = useState("copy");
 
     // 画面状態
     const [currentView, setCurrentView] = useState<AppView>('setup');
-
     const [batchStatus, setBatchStatus] = useState<BatchStatus>('idle');
     const [log, setLog] = useState<string[]>([]);
-    const [isDragging, setIsDragging] = useState(false);
+
     const [showSplash, setShowSplash] = useState(true);
+    const [isDragging, setIsDragging] = useState(false);
+
+    // 複雑なタスク実行用のState
+    const taskResults = useRef<Map<string, ProcessResult>>(new Map());
 
     // 現在処理中のファイルのインデックスを追跡するRef
     const currentFileIdRef = useRef<string | null>(null);
@@ -59,15 +70,27 @@ function App() {
     // ログの自動スクロール用
     const logEndRef = useRef<HTMLDivElement>(null);
 
+    // 常に最新のfileListを保持するRef
+    const fileListRef = useRef<MediaInfo[]>([]);
+    useEffect(() => {
+        fileListRef.current = fileList;
+    }, [fileList]);
+
+    // 現在のモード (UIで切り替えられるようにする)
+    const [mode, setMode] = useState<'normal' | 'dual_ff'>('normal');
+
     // --- Actions ---
-    // ファイル追加 (重複チェック付き)
+    // ファイル追加
     const addFilesToList = async (
         newPaths: string[],
         isTempFile: boolean = false,
         outputType: 'same' | 'video' | 'temp' = 'same'
     ) => {
-        const currentPaths = new Set(fileList.map(f => f.path));
+        // 重複チェック: パス名でチェック
+        const currentPaths = new Set(fileListRef.current.map(f => f.path));
         const uniquePaths = newPaths.filter(p => !currentPaths.has(p));
+
+        console.log(fileList, uniquePaths);
 
         if (uniquePaths.length === 0) return;
 
@@ -81,7 +104,8 @@ function App() {
             status: 'waiting',
             progress: 0,
             isTemp: isTempFile, // Tempフラグ
-            outputType: outputType
+            outputType: outputType,
+            taskType: 'convert'
         }));
 
         setFileList(prev => [...prev, ...newItems]);
@@ -121,7 +145,7 @@ function App() {
         }
     };
 
-    // 削除フロー開始 (F8 or ボタン)
+    // 削除フロー開始 (F8 or ボタン; Setup用)
     const startBatchDelete = async () => {
         if (selectedIds.size === 0) return;
         const filesToDelete = fileList.filter(f => selectedIds.has(f.id));
@@ -143,7 +167,7 @@ function App() {
             });
         }
 
-        // 一時ファイル: 確認ダイアログへ
+        // Tempファイル: 確認ダイアログ
         if (tempFiles.length > 0) {
             const targets: DeleteTarget[] = [];
             try {
@@ -164,12 +188,20 @@ function App() {
     // 削除実行 (Confirm)
     const confirmBatchDelete = async () => {
         if (!deleteTargets) return;
+
         for (const target of deleteTargets) {
+            // 物理削除実行
             if (target.token) await ConfirmDelete(target.token);
+            // リスト更新
             setFileList(prev => prev.filter(f => f.id !== target.file.id));
         }
         setSelectedIds(new Set()); // 選択解除
         setDeleteTargets(null);    // ダイアログ閉じる
+
+        // Processing画面なら, 削除が終わったので完了状態へ
+        if (currentView === 'processing') {
+            finishAll();
+        }
     };
 
     // 削除キャンセル
@@ -242,6 +274,7 @@ function App() {
         return filePath;
     };
 
+    // --- Events ---
     // 環境判定 (Mac && 非Retina)
     useEffect(() => {
         const setupFontSmoothing = async () => {
@@ -323,7 +356,7 @@ function App() {
             if (currentFileIdRef.current === null) return;
             const targetId = currentFileIdRef.current;
 
-            setFileList(prevList => {
+            const updateFunc = (prevList: MediaInfo[]) => {
                 return prevList.map(item => {
                     if (item.id === targetId && item.duration > 0) {
                         // 時間から進捗率を計算
@@ -331,12 +364,19 @@ function App() {
                         return {
                             ...item,
                             progress: percent,
-                            encodedSize: data.size // Goから正確なバイト数が来る
+                            encodedSize: data.size // 現在の出力サイズ
                         };
                     }
                     return item;
                 });
-            });
+            };
+
+            if (currentView === 'processing') {
+                setTaskList(updateFunc);
+            } else {
+                // Setup画面でアップロード中などの場合用
+                setFileList(updateFunc);
+            }
         };
 
         // イベント登録
@@ -362,6 +402,34 @@ function App() {
     useEffect(() => {
         logEndRef.current?.scrollIntoView({ behavior: "auto" });
     }, [log]);
+
+    // 進捗リスナー (Processing時は taskList を更新)
+    useEffect(() => {
+        const onProgress = (data: ProgressEvent) => {
+            if (currentFileIdRef.current === null) return;
+            const targetId = currentFileIdRef.current;
+
+            // taskList を更新する
+            setTaskList(prevList => {
+                return prevList.map(item => {
+                    if (item.id === targetId && item.duration > 0) {
+                        const scale = item.timeScale || 1.0;
+                        const expectedDuration = item.duration / scale;
+                        const percent = Math.min(100, (data.timeSec / expectedDuration) * 100);
+                        return {
+                            ...item,
+                            progress: percent,
+                            encodedSize: data.size
+                        };
+                    }
+                    return item;
+                });
+            });
+        };
+
+        EventsOn("conversion:progress", onProgress);
+        return () => EventsOff("conversion:progress");
+    }, []);
 
     // HTML5標準のドロップハンドラ (Windows用)
     const handleHtmlDrop = async (e: React.DragEvent<HTMLDivElement>) => {
@@ -393,7 +461,8 @@ function App() {
                     status: path ? 'waiting' : 'uploading',
                     isTemp: path ? false : true,
                     outputType: 'video',
-                    progress: 0
+                    progress: 0,
+                    taskType: 'convert'
                 };
             });
 
@@ -448,80 +517,202 @@ function App() {
         }
     };
 
-    // 変換実行ボタンの処理
-    const startConversion = async () => {
-        if (fileList.length === 0) {
-            return;
-        }
+    // 処理開始
+    const handleStart = () => {
         setCurrentView('processing');
+        // 後で実装
+    };
+
+    // タスクランナー
+    const runComplexTasks = async (generatedTasks: MediaInfo[]) => {
         setBatchStatus('converting');
-        setLog(["Starting process..."]);
         setStartTime(Date.now()); // 全体の開始時刻
+        taskResults.current.clear();
+        setLog([`🥁 Starting process... at ${new Date().toISOString()}`]);
+
+        // SetupViewからProcessingViewへ遷移
+        setCurrentView('processing');
+
+        // 実行用リスト(taskList)にセットする
+        setTaskList(generatedTasks);
+
+        // 'trash' 以外のタスクを抽出して実行
+        const processingTasks = generatedTasks.filter(t => t.taskType !== 'trash');
 
         // 全ファイルを順次処理
-        for (const item of fileList) {
+        for (let i = 0; i < processingTasks.length; i++) {
+            const task = processingTasks[i];
             // 処理開始前にRefを更新
-            currentFileIdRef.current = item.id;
+            currentFileIdRef.current = task.id;
 
-            // ステータスをProcessingに変更
-            setFileList(prev => prev.map(f =>
-                f.id === item.id ? {
-                    ...f,
-                    status: 'processing',
+            setTaskList(prev => prev.map(t =>
+                t.id === task.id ? {
+                    ...t,
+                    status: 'processing', // ここでProcessingにする
                     progress: 0,
-                    startedAt: Date.now(), // ここで刻む
+                    startedAt: Date.now(), // 開始時刻を記録
                     encodedSize: 0
-                } : f
+                } : t
             ));
 
-            try {
-                setLog(prev => [...prev, `[INFO] Converting: ${item.path}...`]);
+            // ステータス更新: Processing
+            updateTaskStatus(task.id, 'processing', 0);
 
-                // CommandFactoryを使ってリクエストを作成
-                const request = createConvertRequest(item, {
-                    codec: codec,
-                    audio: audio
-                });
+            try {
+                // Request 準備
+                if (!task.processRequest) {
+                    throw new Error("No process request found for task");
+                }
+
+                // リクエストのディープコピーを作成（パス書き換え用）
+                let req = JSON.parse(JSON.stringify(task.processRequest));
+
+                // 依存パスの解決 (Concat用)
+                if (task.taskType === 'concat' && task.dependencyRefs) {
+                    const resolvedPaths: string[] = [];
+
+                    for (const ref of task.dependencyRefs) {
+                        if (ref.startsWith("ref:")) {
+                            const targetId = ref.split(':')[1];
+                            const prevResult = taskResults.current.get(targetId);
+
+                            if (prevResult) {
+                                // temp_chunk ラベルを持つ結果を探す
+                                let chunk = prevResult?.results.find((r: any) => r.label === 'temp_chunk');
+                                if (!chunk) chunk = prevResult?.results.find((r: any) => r.label === 'main'); // mainフォールバック
+                                if (chunk) resolvedPaths.push(chunk.path);
+                            }
+                        }
+                    }
+
+                    if (resolvedPaths.length === 0) {
+                        throw new Error("Dependency resolution failed: No inputs found.");
+                    }
+
+                    req.input.paths = resolvedPaths;
+                    console.log("Resolved Concat Inputs:", resolvedPaths);
+                }
+
+                setLog(prev => [...prev, `[RUN] ${task.taskType}: ${task.path}`]);
 
                 // 結果を受け取る
                 // Go側で (ConvertResult, error) を返す
                 // JS側では Promise<ConvertResult> ({ results: FileResult[] })が返ってくる
-                const result = await RunProcess(request);
+                const result = await RunProcess(req);
 
-                // 結果からメイン出力を探す (label="main")
-                const mainOutput = result.results.find((r: { label: string; }) => r.label === 'main');
+                // 結果保存
+                taskResults.current.set(task.id, result);
+
+                // 完了更新
+                // メイン出力 (label='main') を探して表示に反映
+                const mainOut = result.results.find((r: any) => r.label === 'main');
 
                 // 完了したらDoneにする
-                setFileList(prev => prev.map(f =>
-                    f.id === item.id ? {
-                        ...f,
-                        status: 'done',
-                        progress: 100,
-                        completedAt: Date.now(), // 終了時刻を記録
-                        encodedSize: mainOutput ? mainOutput.size : 0, // 確定したファイルサイズで上書きする
-                        outputPath: mainOutput ? mainOutput.path : "", // 出力先
-                    } : f
-                ));
-                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${mainOutput.path}`]);
+                setTaskList(prev => prev.map(t => t.id === task.id ? {
+                    ...t,
+                    status: 'done',
+                    progress: 100,
+                    completedAt: Date.now(),
+                    encodedSize: mainOut?.size || 0,
+                    outputPath: mainOut?.path,
+                } : t));
+
+                if (mainOut) {
+                    setLog(prev => [...prev, `>> [SUCCESS] Finished: ${mainOut.path}`]);
+                }
+
             } catch (error) {
-                // エラー
-                setFileList(prev => prev.map(f =>
-                    f.id === item.id ? { ...f, status: 'error' } : f
-                ));
-                setLog(prev => [...prev, `>> [ERROR] Failed: ${item.path} - ${error}`]);
+                console.error(error);
+                updateTaskStatus(task.id, 'error', 0);
+                setLog(prev => [...prev, `>> [ERROR] Failed: ${error}`]);
+                return;
             }
         }
 
         // 全処理終了
         currentFileIdRef.current = null;
-        setBatchStatus('idle');
-        setLog(prev => [...prev, "👺 All tasks completed 👹"])
+        setLog(prev => [...prev, "🌵 Conversion tasks finished"]);
+
+        // Trash Task
+        const trashTasks = generatedTasks.filter(t => t.taskType === 'trash');
+        if (trashTasks.length > 0) {
+            setLog(prev => [...prev, "🗑️ Preparing deletion confirmation..."]);
+
+            const targets: DeleteTarget[] = [];
+
+            // 全ての削除対象に対してトークンを発行
+            for (const task of trashTasks) {
+                try {
+                    const token = await RequestDelete(task.path);
+                    targets.push({ file: task, token });
+                } catch (e) {
+                    console.error("Failed to request delete:", e);
+                    // ファイルが既にない場合などはエラーになるのでスキップ
+                    updateTaskStatus(task.id, 'error', 0);
+                }
+            }
+
+            if (targets.length > 0) {
+                // ダイアログを表示
+                setDeleteTargets(targets);
+            } else {
+                // 削除対象がなかった(既に消えてた等)ので終了
+                finishAll();
+            }
+        } else {
+            // 削除タスクがなければ終了
+            finishAll();
+        }
     };
 
-    // 処理開始
-    const handleStart = () => {
-        setCurrentView('processing');
-        // 後で実装
+    // 全完了処理
+    const finishAll = () => {
+        setBatchStatus('idle');
+        setLog(prev => [...prev, "👺 All operations completed 👹"]);
+    };
+
+    // ヘルパー: ステータス更新用
+    const updateTaskStatus = (id: string, status: any, progress: number) => {
+        setTaskList(prev => prev.map(t => t.id === id ? { ...t, status, progress } : t));
+    };
+
+    const startConversion = () => {
+        if (fileList.length === 0) return;
+
+        // fileList から 通常変換タスク を生成する
+        const tasks = generateNormalTasks(fileList, {
+            codec: codec,
+            audio: audio
+        });
+
+        runComplexTasks(tasks);
+    };
+
+    // レシピダイアログからの実行ハンドラ
+    const handleRecipeRun = (recipeId: string, params: any) => {
+        setIsRecipeOpen(false); // ダイアログ閉じる
+
+        if (fileList.length === 0) return;
+
+        let tasks: MediaInfo[] = [];
+
+        // レシピIDで分岐
+        if (recipeId === 'dual_ff') {
+            tasks = generateDualFFTasks(fileList, {
+                targetDuration: params.targetDuration || 60,
+                trashOriginal: params.trashOriginal || false
+            });
+        }
+        // else if (recipeId === 'concat_only') {
+        //     // (将来実装)
+        //     console.log("Concat Only not implemented yet");
+        //     return;
+        // }
+
+        if (tasks.length > 0) {
+            // 複雑タスク実行ランナーへ
+            runComplexTasks(tasks);
+        }
     };
 
     return (
@@ -553,13 +744,18 @@ function App() {
                             setAudio={setAudio}
                             onStart={startConversion}
                             onOpenReq={handleOpenFile}
+                            onOpenRecipeDialog={() => setIsRecipeOpen(true)}
                         />
                     ) : (
                         <ProcessingView
-                            files={fileList}
+                            files={taskList}
                             log={log}                               // ログを渡す
                             batchStatus={batchStatus}               // 状態を渡す
-                            onBack={() => setCurrentView('setup')}
+                            onBack={() => {
+                                setCurrentView('setup');
+                                setBatchStatus('idle');
+                                setLog([]);
+                            }}
                         />
                     )}
                 </div>
@@ -572,6 +768,7 @@ function App() {
                 canDelete={selectedIds.size > 0}
                 onOpen={handleOpenFile}
                 onRun={startConversion}
+                onRunAdv={() => setIsRecipeOpen(true)}
                 onDelete={startBatchDelete} // F8で発火
                 onBack={() => {
                     if (currentView === 'processing') {
@@ -587,12 +784,20 @@ function App() {
                 }}
             />
             <StatusBar
-                fileList={fileList}
+                fileList={currentView === 'processing' ? taskList : fileList}
                 batchStatus={batchStatus}
                 startTime={startTime}
             />
 
             {/* Global Modal */}
+
+            {/* レシピ選択ダイアログ */}
+            <RecipeSelectDialog
+                isOpen={isRecipeOpen}
+                onRun={handleRecipeRun}
+                onCancel={() => setIsRecipeOpen(false)}
+            />
+
             <DeleteConfirmDialog
                 targets={deleteTargets || []}
                 isOpen={!!deleteTargets}
