@@ -11,7 +11,7 @@ export interface MediaInfo {
     size: number; // ファイルサイズ (byte)
     hasVideo: boolean;
     hasAudio: boolean;
-    duration: number; // 総時間 (秒)
+    duration: number; // 総時間 (秒) (入力)
     progress?: number; // 現在の進捗率 (0-100)
     status?: 'waiting' | 'uploading' | 'processing' | 'done' | 'error' | 'skipped'; // 状態管理用
     dependencyRefs?: string[]; // concatタスクの場合: "ref:{parentTaskId}" を入れる
@@ -24,7 +24,11 @@ export interface MediaInfo {
     tempOutputPath?: string;
     startedAt?: number;   // このファイルの処理開始時刻 (Date.now())
     completedAt?: number; // 処理終了時刻
-    timeScale?: number; // 時間圧縮率 (デフォルトは 1.0)
+    
+    // レシピ側で計算する 予定/目標値
+    expectedDuration?: number; // 完了時の予想時間 (秒)。進捗率の分母になる。
+    expectedSize?: number;     // 完了時の予想サイズ (バイト)。
+    timeScale?: number;        // 処理速度の倍率 (x60 等)。ダッシュボード表示用。
 }
 
 // レシピの定義
