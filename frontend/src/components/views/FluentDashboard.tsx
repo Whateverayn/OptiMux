@@ -6,14 +6,18 @@ import {
     webDarkTheme,
     ProgressBar,
     Card,
-    Body1,
-    Caption1,
+    Body1 as Body1Original,
+    Caption1 as Caption1Original,
     Subtitle1,
     Display,
     makeStyles,
     shorthands,
     tokens
 } from '@fluentui/react-components';
+
+// Fix for strict type checking with React 18 types
+const Body1 = Body1Original as any;
+const Caption1 = Caption1Original as any;
 import { MediaInfo, BatchStatus } from "../../types.js";
 
 // 親で計算している統計情報の型定義
@@ -168,7 +172,7 @@ export default function FluentDashboard({
                     {/* ヘッダー */}
                     <div className={styles.header}>
                         <div className={styles.titleGroup}>
-                            <div className={styles.iconBox}>👺</div>
+                            <div className={`${styles.iconBox} ${((currentFile.progress || 0) < 1 || stats.elapsed < 10) ? 'dirty-bounce' : ''}`}>👺</div>
                             <div className={styles.fileInfo}>
                                 <Caption1>Processing Status</Caption1>
                                 <Body1 className={styles.boldText} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

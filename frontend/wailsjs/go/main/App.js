@@ -22,6 +22,18 @@ export function ConvertVideo(arg1, arg2) {
   return window['go']['main']['App']['ConvertVideo'](arg1, arg2);
 }
 
+export function GetAvailableEncoders() {
+  return window['go']['main']['App']['GetAvailableEncoders']();
+}
+
+export function GetAvailableFormats() {
+  return window['go']['main']['App']['GetAvailableFormats']();
+}
+
+export function GetEncoderDefault(arg1) {
+  return window['go']['main']['App']['GetEncoderDefault'](arg1);
+}
+
 export function GetOSName() {
   return window['go']['main']['App']['GetOSName']();
 }
@@ -32,6 +44,10 @@ export function Greet(arg1) {
 
 export function RequestDelete(arg1) {
   return window['go']['main']['App']['RequestDelete'](arg1);
+}
+
+export function RunExifTool(arg1, arg2) {
+  return window['go']['main']['App']['RunExifTool'](arg1, arg2);
 }
 
 export function RunProcess(arg1) {

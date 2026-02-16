@@ -1,6 +1,6 @@
 // types.ts
 
-export type TaskType = 'convert' | 'concat' | 'trash';
+export type TaskType = 'convert' | 'concat' | 'trash' | 'exiftool';
 
 export interface MediaInfo {
     id: string; // UUID
@@ -24,7 +24,7 @@ export interface MediaInfo {
     tempOutputPath?: string;
     startedAt?: number;   // このファイルの処理開始時刻 (Date.now())
     completedAt?: number; // 処理終了時刻
-    
+
     // レシピ側で計算する 予定/目標値
     expectedDuration?: number; // 完了時の予想時間 (秒)。進捗率の分母になる。
     expectedSize?: number;     // 完了時の予想サイズ (バイト)。

@@ -1,12 +1,10 @@
 import React, { useEffect, useRef } from 'react';
-import { MediaInfo, BatchStatus } from "../../types.js";
+import { MediaInfo } from "../../types.js";
 import ProgressBar from '../ui/ProgressBar.js';
 import FluentDashboard, { DashboardStats } from "./FluentDashboard.js";
+import { useJob } from '../../contexts/JobContext.js';
 
 interface Props {
-    files: MediaInfo[];
-    log: string[];          // 親からログを受け取る
-    batchStatus: BatchStatus;  // 処理中かどうか
     onBack: () => void;     // 戻る ボタン
 }
 
@@ -30,7 +28,9 @@ const formatTime = (sec: number) => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
-export default function ProcessingView({ files, log, batchStatus, onBack }: Props) {
+export default function ProcessingView({ onBack }: Props) {
+    const { taskList: files, log, batchStatus } = useJob();
+
     const logEndRef = useRef<HTMLDivElement>(null);
     const processingItemRef = useRef<HTMLDivElement>(null);
 
@@ -47,8 +47,8 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
         }
     }, [processingFileId]);
 
-    // フィルタリング: trashは隠す
-    const visibleFiles = files.filter(f => f.taskType !== 'trash');
+    // フィルタリング: trash, exiftoolは隠す
+    const visibleFiles = files.filter(f => f.taskType !== 'trash' && f.taskType !== 'exiftool');
 
     let targetFile: MediaInfo | null = null;
     let targetStats: DashboardStats | null = null;

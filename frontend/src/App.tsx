@@ -8,12 +8,16 @@ import {
     ConfirmDelete,
     CancelDelete,
     GetOSName,
-    SelectVideoFiles
+    SelectVideoFiles,
+    RunExifTool,
+    GetAvailableEncoders,
+    GetAvailableFormats
 } from "../wailsjs/go/main/App.js";
 import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
 import { createConvertRequest } from "./utils/commandFactory.js";
 import { generateDualFFTasks } from "./utils/recipes/dualff.js";
 import { generateNormalTasks } from "./utils/recipes/normal.js";
+import { generateResizeTasks } from "./utils/recipes/resize.js";
 import { MediaInfo, BatchStatus, ProcessResult, ProcessRequest } from "./types.js";
 
 // JobContext
@@ -373,6 +377,38 @@ function AppContent() {
             });
 
             try {
+                // --- ExifTool Task ---
+                if (task.taskType === 'exiftool') {
+                    actions.addLog(`[RUN] ExifTool: Copying metadata...`);
+
+                    // 1. Source (Original)
+                    const srcPath = task.processRequest?.input.paths[0];
+                    if (!srcPath) throw new Error("ExifTool: Source path not found");
+
+                    // 2. Destination (Output of dependent task)
+                    let dstPath = "";
+                    if (task.dependencyRefs && task.dependencyRefs.length > 0) {
+                        const refId = task.dependencyRefs[0].split(':')[1];
+                        const prevResult = taskResults.current.get(refId);
+                        const mainOut = prevResult?.results.find((r: any) => r.label === 'main');
+                        dstPath = mainOut?.path || "";
+                    }
+                    if (!dstPath) throw new Error("ExifTool: Destination path not found (Dependency failed)");
+
+                    // 実行
+                    await RunExifTool(srcPath, dstPath);
+
+                    actions.updateTask(task.id, {
+                        status: 'done',
+                        progress: 100,
+                        completedAt: Date.now()
+                    });
+                    actions.addLog(`>> [SUCCESS] ExifTool Finished`);
+                    continue; // 次のタスクへ
+                }
+
+                // --- Convert / Concat Task ---
+
                 // Request 準備
                 if (!task.processRequest) throw new Error("No process request");
                 // リクエストのディープコピーを作成
@@ -491,7 +527,17 @@ function AppContent() {
         if (recipeId === 'dual_ff') {
             tasks = generateDualFFTasks(files, {
                 targetDuration: params.targetDuration || 60,
-                trashOriginal: params.trashOriginal || false
+                trashOriginal: params.trashOriginal || false,
+                rotation: params.rotation || "90"
+            });
+        } else if (recipeId === 'resize') {
+            tasks = generateResizeTasks(files, {
+                resolution: params.resolution || 0,
+                videoCodec: params.videoCodec || 'libsvtav1',
+                audioCodec: params.audioCodec || 'copy',
+                container: params.container || 'mp4',
+                crf: params.crf,
+                keepMetadata: params.keepMetadata !== false // default true
             });
         }
         if (tasks.length > 0) runComplexTasks(tasks);
@@ -556,6 +602,7 @@ function AppContent() {
 
             if (targetTask) {
                 const targetDuration = targetTask.expectedDuration || targetTask.duration;
+
                 // ゼロ除算対策
                 const percent = targetDuration > 0
                     // 時間から進捗率を計算
@@ -717,9 +764,6 @@ function AppContent() {
                         />
                     ) : (
                         <ProcessingView
-                            // files={taskList} // ProcessingView内でuseJobを使うなら不要
-                            // log={log}       // 不要
-                            // batchStatus={batchStatus}  // 不要
                             onBack={() => {
                                 setCurrentView('setup');
                                 actions.setBatchStatus('idle');
@@ -752,11 +796,7 @@ function AppContent() {
             />
 
             {/* StatusBarはProps不要 (内部でuseJobする) */}
-            <StatusBar
-            // fileList={currentView === 'processing' ? taskList : fileList}
-            // batchStatus={batchStatus}
-            // startTime={startTime}
-            />
+            <StatusBar />
 
             {/* Modals */}
             <RecipeSelectDialog

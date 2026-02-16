@@ -169,6 +169,7 @@ export default function SetupView({
                         onClick={onOpenRecipeDialog}
                         disabled={files.length === 0}
                         title="Open Advanced Tasks"
+                        style={{ marginLeft: 'auto' }}
                     >
                         🌵 Advanced Run...
                     </button>

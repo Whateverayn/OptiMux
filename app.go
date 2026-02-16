@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -804,4 +806,190 @@ func (a *App) RunProcess(req ProcessRequest) (ProcessResult, error) {
 	}
 
 	return ProcessResult{Results: results}, nil
+}
+
+// GetAvailableEncoders returns a list of available encoders
+func (a *App) GetAvailableEncoders() (map[string][]string, error) {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	cmd := exec.Command(ffmpegPath, "-encoders")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get encoders: %w", err)
+	}
+
+	videoEncoders := []string{}
+	audioEncoders := []string{}
+
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) < 8 {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+
+		if strings.Contains(line, " V") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				// V..... libx264
+				// simple parsing: finding the one with V flag
+				// standard output: " V....D libx264 ..."
+				// parts[0] is flags, parts[1] is name
+				name := parts[1]
+				if name != "=" {
+					videoEncoders = append(videoEncoders, name)
+				}
+			}
+		} else if strings.Contains(line, " A") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				name := parts[1]
+				if name != "=" {
+					audioEncoders = append(audioEncoders, name)
+				}
+			}
+		}
+	}
+
+	// sort
+	sort.Strings(videoEncoders)
+	sort.Strings(audioEncoders)
+
+	return map[string][]string{
+		"video": videoEncoders,
+		"audio": audioEncoders,
+	}, nil
+}
+
+// GetEncoderDefault returns the default CRF/quality value for a given codec
+func (a *App) GetEncoderDefault(codec string) (int, error) {
+	fmt.Printf("[DEBUG] GetEncoderDefault called for codec: %s\n", codec)
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		fmt.Printf("[DEBUG] ffmpeg not found: %v\n", err)
+		return -1, fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	// 1. Try parsing help output first (fastest)
+	// regex to find "default" followed by number
+	// captures: "default 23", "default: 23", "default -1"
+	// Case insensitive
+	reHelp := regexp.MustCompile(`(?i)default[:\s]+([-0-9\.]+)`)
+
+	cmd := exec.Command(ffmpegPath, "-h", fmt.Sprintf("encoder=%s", codec))
+	outHelp, _ := cmd.CombinedOutput()
+
+	// Scan line by line to find CRF specific default
+	scanner := bufio.NewScanner(bytes.NewReader(outHelp))
+	parsedVal := -100 // sentinel
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "-crf") || strings.Contains(line, "-global_quality") || strings.Contains(line, "-q:v") {
+			matches := reHelp.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if v, err := strconv.ParseFloat(matches[1], 64); err == nil {
+					parsedVal = int(v)
+					fmt.Printf("[DEBUG] Help matched: %s -> %d\n", line, parsedVal)
+				}
+			}
+		}
+	}
+
+	// If we got a sensible positive value, return it.
+	if parsedVal > 0 {
+		return parsedVal, nil
+	}
+
+	// 2. If help gave -1 or 0 (or nothing), try DRY RUN detection
+	// Run 1 frame text/null encode and grep debug log
+	// ffmpeg -f lavfi -i color=s=64x64:d=0.1 -c:v <codec> -frames:v 1 -f null - -loglevel debug
+
+	debugCmd := exec.Command(ffmpegPath,
+		"-f", "lavfi", "-i", "color=s=64x64:d=0.1",
+		"-c:v", codec,
+		"-frames:v", "1",
+		"-f", "null", "-",
+		"-loglevel", "debug",
+	)
+	debugOut, _ := debugCmd.CombinedOutput()
+
+	// Regex for x265: "CRF-28.0"
+	// Regex for SVT: "CRF / 35.00"
+	// Regex Generic: "global_quality=..." or "q=..." matches might be noisy,
+	// but let's try to find explicit "CRF" or "Quality" lines first.
+	// Also Match "q=-0.0" is meaningless.
+	// We need to look for configuration logs usually printed at start.
+	reDebug := regexp.MustCompile(`(?i)(?:CRF|Quality|q)(?:[:\s/-]+)([0-9\.]+)`)
+
+	scannerDebug := bufio.NewScanner(bytes.NewReader(debugOut))
+	for scannerDebug.Scan() {
+		line := scannerDebug.Text()
+		// Determine if this line contains quality info
+		if strings.Contains(line, "CRF") || strings.Contains(line, "global_quality") {
+			matches := reDebug.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if v, err := strconv.ParseFloat(matches[1], 64); err == nil && v > 0 {
+					return int(v), nil
+				}
+			}
+		}
+	}
+
+	// NO FALLBACK MAP
+	// If we absolutely cannot find anything, return -1.
+	// This indicates "Unknown Default" to the UI, so it can handle it (e.g. disable "Use Default" or just show blank).
+	return -1, nil
+}
+
+// GetAvailableFormats returns a list of available formats (containers)
+func (a *App) GetAvailableFormats() ([]string, error) {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	cmd := exec.Command(ffmpegPath, "-formats")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get formats: %w", err)
+	}
+
+	formats := []string{}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, " E ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				name := parts[1]
+				formats = append(formats, name)
+			}
+		}
+	}
+	sort.Strings(formats)
+	return formats, nil
+}
+
+// RunExifTool executes exiftool to copy metadata
+func (a *App) RunExifTool(src, dst string) error {
+	fixPath()
+	exiftoolPath, err := exec.LookPath("exiftool")
+	if err != nil {
+		return fmt.Errorf("exiftool not found")
+	}
+
+	// -TagsFromFile src -all:all dst -overwrite_original
+	cmd := exec.Command(exiftoolPath, "-TagsFromFile", src, "-all:all", dst, "-overwrite_original")
+	return cmd.Run()
 }
