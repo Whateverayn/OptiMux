@@ -4,10 +4,30 @@ import {main} from '../models';
 
 export function AnalyzeMedia(arg1:string):Promise<main.MediaInfo>;
 
+export function CancelDelete(arg1:string):Promise<void>;
+
+export function CheckFileExists(arg1:string):Promise<boolean>;
+
+export function ConfirmDelete(arg1:string):Promise<void>;
+
 export function ConvertVideo(arg1:string,arg2:main.EncodeOptions):Promise<main.ConvertResult>;
+
+export function GetAvailableEncoders():Promise<Record<string, Array<string>>>;
+
+export function GetAvailableFormats():Promise<Array<string>>;
+
+export function GetEncoderDefault(arg1:string):Promise<number>;
 
 export function GetOSName():Promise<string>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function RequestDelete(arg1:string):Promise<string>;
+
+export function RunExifTool(arg1:string,arg2:string):Promise<void>;
+
+export function RunProcess(arg1:main.ProcessRequest):Promise<main.ProcessResult>;
+
+export function SelectVideoFiles():Promise<Array<string>>;
 
 export function UploadChunk(arg1:string,arg2:string,arg3:number):Promise<string>;

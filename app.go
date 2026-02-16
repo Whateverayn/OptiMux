@@ -11,14 +11,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// App struct
+type App struct {
+	ctx              context.Context
+	pendingDeletions map[string]string // [UUID]FilePath
+	mu               sync.Mutex
+}
 
 // MediaInfo は ffprobe から取得したファイル情報を保持
 type MediaInfo struct {
@@ -36,15 +46,51 @@ type MediaInfo struct {
 
 // フロントエンドから受け取る設定
 type EncodeOptions struct {
-	Codec     string `json:"codec"`     // "hevc" | "av1"
-	Audio     string `json:"audio"`     // "copy" | "none"
-	Extension string `json:"extension"` // "mp4"  | "mov"
+	Codec         string `json:"codec"`         // "hevc" | "av1"
+	Audio         string `json:"audio"`         // "copy" | "none"
+	Extension     string `json:"extension"`     // "mp4"  | "mov"
+	OutputPath    string `json:"outputPath"`    // 出力先パス (優先)
+	OutputDirType string `json:"outputDirType"` // "same" | "videos" | "downloads" | "temp" (OutputPathが空の場合に使用)
+}
+
+type InputConfig struct {
+	Mode  string   `json:"mode"` // "single" | "concat"
+	Paths []string `json:"paths"`
+}
+
+type OutputConfig struct {
+	Label         string   `json:"label"` // "main", "proxy", "thumbnail" 等の識別子
+	DirType       string   `json:"dirType"`
+	CustomDir     string   `json:"customDir"`
+	NameMode      string   `json:"nameMode"`
+	NameValue     string   `json:"nameValue"`
+	Extension     string   `json:"extension"`
+	FFmpegOptions []string `json:"ffmpegOptions"`
+}
+
+type ProcessRequest struct {
+	FileID        string         `json:"fileId"`
+	Input         InputConfig    `json:"input"`
+	GlobalOptions []string       `json:"globalOptions"`
+	Outputs       []OutputConfig `json:"outputs"`
 }
 
 // 変換結果を返すための構造体
 type ConvertResult struct {
-	OutputPath string `json:"outputPath"`
-	Size       int64  `json:"size"`
+	Primary   FileResult `json:"primary"`   // メイン出力 (Output A)
+	Secondary FileResult `json:"secondary"` // サブ出力 (Output B, 任意)
+}
+
+// FileResult: 個別のファイル結果
+type FileResult struct {
+	Label string `json:"label"` // リクエスト時のLabelをそのまま返す
+	Path  string `json:"path"`
+	Size  int64  `json:"size"`
+}
+
+// ProcessResult: 最終結果リスト
+type ProcessResult struct {
+	Results []FileResult `json:"results"`
 }
 
 // フロントエンドに送る進捗データ構造体
@@ -53,14 +99,11 @@ type ProgressEvent struct {
 	Size    int64   `json:"size"`    // 現在サイズ (byte)
 }
 
-// App struct
-type App struct {
-	ctx context.Context
-}
-
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{
+		pendingDeletions: make(map[string]string),
+	}
 }
 
 // startup is called when the app starts. The context is saved
@@ -90,7 +133,7 @@ func (a *App) Greet(name string) string {
 
 // GetOSName returns the current operating system name (darwin, windows, linux)
 func (a *App) GetOSName() string {
-    return runtime.GOOS
+	return runtime.GOOS
 }
 
 // ヘルパー関数: 一般的なパスを追加する
@@ -248,25 +291,79 @@ func (a *App) AnalyzeMedia(filePath string) (MediaInfo, error) {
 	return info, nil
 }
 
-// 動画変換を実行 (非同期で実行され、イベントで進捗を通知)
+// ConvertVideo (レガシー互換用; 動画変換を実行 (非同期で実行され、イベントで進捗を通知))
 func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult, error) {
-	fixPath()
-	ffmpegPath, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return ConvertResult{}, fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
-	}
+	var finalOutputPath string
 
-	// 出力パスの生成 (例: input.mov -> input_opt.mov)
-	ext := opts.Extension
-	if ext == "" {
-		ext = "mov"
+	// 出力パス決定
+	if opts.OutputPath != "" {
+		// 絶対パスが直接指定されている場合
+		finalOutputPath = opts.OutputPath
+		if err := os.MkdirAll(filepath.Dir(finalOutputPath), 0755); err != nil {
+			return ConvertResult{}, fmt.Errorf("出力先ディレクトリ作成失敗: %w", err)
+		}
+	} else {
+		// ディレクトリタイプから自動生成
+		var targetDir string
+		var forceFileName string // 特定条件でファイル名を強制する場合に使用
+
+		home, _ := os.UserHomeDir()
+
+		switch opts.OutputDirType {
+		case "videos":
+			// ~Movies/OptiMux
+			if runtime.GOOS == "windows" {
+				targetDir = filepath.Join(home, "Videos", "OptiMux")
+			} else {
+				targetDir = filepath.Join(home, "Movies", "OptiMux")
+			}
+		case "downloads":
+			// ~Downloads/OptiMux
+			targetDir = filepath.Join(home, "Downloads", "OptiMux")
+		case "temp":
+			// OS一時フォルダ/OptiMux/Intermediate (自動削除対象の集積所)
+			targetDir = filepath.Join(os.TempDir(), "OptiMux", "Intermediate")
+
+			// ファイル名をUUIDにする
+			newID := uuid.New().String()
+			ext := opts.Extension
+			if ext == "" {
+				ext = "mp4"
+			} // デフォルト拡張子
+			forceFileName = fmt.Sprintf("%s.%s", newID, ext)
+		case "same":
+			// 入力ファイルと同じ場所 (デフォルト)
+			targetDir = filepath.Dir(inputPath)
+		default:
+			// 未指定の場合も入力と同じ場所
+			targetDir = filepath.Dir(inputPath)
+		}
+
+		// ディレクトリ作成
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return ConvertResult{}, fmt.Errorf("出力ディレクトリ作成失敗: %w", err)
+		}
+
+		// 最終的な出力パスの結合
+		if forceFileName != "" {
+			// UUIDファイル名を使用 (Tempの場合)
+			finalOutputPath = filepath.Join(targetDir, forceFileName)
+		} else {
+			// ファイル名生成 (input.mov -> input_hevc.mov)
+			originalName := filepath.Base(inputPath)
+			ext := opts.Extension
+			if ext == "" {
+				ext = "mov"
+			}
+			baseName := strings.TrimSuffix(originalName, filepath.Ext(originalName))
+			outputName := fmt.Sprintf("%s_%s.%s", baseName, opts.Codec, ext)
+
+			finalOutputPath = filepath.Join(targetDir, outputName)
+		}
 	}
-	outputPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + "_" + opts.Codec + "." + ext
 
 	// コマンド組立
-	args := []string{
-		"-i", inputPath,
-	}
+	args := []string{"-i", inputPath}
 
 	// 映像設定
 	if opts.Codec == "av1" {
@@ -292,25 +389,193 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 	args = append(args, "-progress", "pipe:1", "-nostats")
 
 	// 出力パス
-	args = append(args, outputPath)
+	args = append(args, finalOutputPath)
 
 	// コマンド実行
+	if err := a.executeFFmpeg(args); err != nil {
+		return ConvertResult{}, fmt.Errorf("変換に失敗しました: %w", err)
+	}
+
+	// 結果返却
+	fileInfo, err := os.Stat(finalOutputPath)
+	if err != nil {
+		// 変換は成功したがファイルが見つからないケース
+		return ConvertResult{}, fmt.Errorf("出力確認失敗: %w", err)
+	}
+
+	return ConvertResult{
+		Primary: FileResult{
+			Path: finalOutputPath,
+			Size: fileInfo.Size()},
+		Secondary: FileResult{},
+	}, nil
+}
+
+// UploadChunk: 分割データを受け取りファイルに追記する
+func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (string, error) {
+	// 保存先: os.TempDir()/OptiMux/Imports
+	tempRoot := os.TempDir()
+	dir := filepath.Join(tempRoot, "OptiMux", "Imports")
+	_ = os.MkdirAll(dir, 0755)
+
+	path := filepath.Join(dir, filename)
+
+	// ファイルを開く (作成 or 追記)
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset == 0 {
+		flags |= os.O_TRUNC // 初回は上書き
+	} else {
+		flags |= os.O_APPEND // 2回目以降は追記
+	}
+
+	f, err := os.OpenFile(path, flags, 0644)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	// Base64デコード
+	payload := dataBase64
+	if idx := strings.Index(dataBase64, ","); idx != -1 {
+		payload = dataBase64[idx+1:]
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return "", err
+	}
+
+	_, err = f.Write(decoded)
+	return path, err
+}
+
+// --- ファイル操作, 削除系 API ---
+
+// SelectVideoFiles: ファイル選択ダイアログを開く
+func (a *App) SelectVideoFiles() ([]string, error) {
+	selection, err := wailsRuntime.OpenMultipleFilesDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "🍎 Select Media Files 🤖",
+		Filters: []wailsRuntime.FileFilter{
+			{
+				DisplayName: "🐈 Video Files",
+				Pattern:     "*.mov;*.mp4;*.mkv;*.avi;*.webm;*.flv;*.m4v;*.wmv;*.mpg;*.mpeg;*.ts;*.3gp;*.m2ts",
+			},
+			{
+				DisplayName: "👺 All Files",
+				Pattern:     "*.*",
+			},
+		},
+	})
+	return selection, err
+}
+
+// CheckFileExists: ファイルが存在するか
+func (a *App) CheckFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
+}
+
+// RequestDelete: 削除リクエスト (UUID発行)
+func (a *App) RequestDelete(filePath string) (string, error) {
+	if filePath == "" {
+		return "", fmt.Errorf("パスが空です")
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", fmt.Errorf("ファイルが見つかりません")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	token := uuid.New().String()
+	a.pendingDeletions[token] = filePath
+	return token, nil
+}
+
+// ConfirmDelete: 削除実行 (ゴミ箱へ移動)
+func (a *App) ConfirmDelete(token string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	path, exists := a.pendingDeletions[token]
+	if !exists {
+		return fmt.Errorf("無効な削除トークンです")
+	}
+
+	// OSごとのゴミ箱移動ロジック
+	if err := moveToTrash(path); err != nil {
+		return fmt.Errorf("ゴミ箱への移動に失敗しました: %w", err)
+	}
+
+	delete(a.pendingDeletions, token)
+	return nil
+}
+
+// OSごとのゴミ箱移動コマンドを実行するヘルパー関数
+func moveToTrash(filePath string) error {
+	// 絶対パスに変換 (念のため)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		// macOS: AppleScriptを使ってFinder経由で削除
+		// 'tell application "Finder" to delete POSIX file "/path/to/file"'
+		cmd := exec.Command("osascript", "-e", fmt.Sprintf(`tell application "Finder" to delete POSIX file "%s"`, absPath))
+		return cmd.Run()
+
+	case "windows":
+		// Windows: PowerShellのVisualBasicライブラリを借りる
+		// [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('Path', 'OnlyErrorDialogs', 'SendToRecycleBin')
+		psCommand := fmt.Sprintf(`Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('%s', 'AllDialogs', 'SendToRecycleBin')`, absPath)
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", psCommand)
+		return cmd.Run()
+
+	case "linux":
+		// Linux: gio trash (GNOME系) または kioclient5 (KDE系) など環境による
+		if _, err := exec.LookPath("gio"); err == nil {
+			return exec.Command("gio", "trash", absPath).Run()
+		}
+		return fmt.Errorf("ゴミ箱コマンド(gio)が見つかりませんでした")
+
+	default:
+		return fmt.Errorf("このOSのゴミ箱機能はサポートされていません")
+	}
+}
+
+// CancelDelete: 削除キャンセル (マップから消す)
+func (a *App) CancelDelete(token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pendingDeletions, token)
+}
+
+// executeFFmpeg: 引数を受け取って実行し, 進捗とログをイベント送信する
+func (a *App) executeFFmpeg(args []string) error {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return fmt.Errorf("ffmpegが見つかりません. PATHが通っているか確認してください: %w", err)
+	}
+
 	cmd := exec.Command(ffmpegPath, args...)
 
 	// パイプの準備
-	stdout, _ := cmd.StdoutPipe() // 進捗データ用
-	stderr, _ := cmd.StderrPipe() // ログテキスト用
+	stdout, _ := cmd.StdoutPipe() // Progress data (pipe:1)
+	stderr, _ := cmd.StderrPipe() // Log text
 
 	// 標準エラー出力(stderr)をパイプで取得
 	if err := cmd.Start(); err != nil {
-		return ConvertResult{}, err
+		return err
 	}
 
 	// 並行処理の待機用
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// 進捗データ解析 (stdout)
+	// 進捗解析 (stdout)
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
@@ -325,6 +590,7 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 			if len(parts) != 2 {
 				continue
 			}
+
 			key := strings.TrimSpace(parts[0])
 			val := strings.TrimSpace(parts[1])
 
@@ -371,71 +637,359 @@ func (a *App) ConvertVideo(inputPath string, opts EncodeOptions) (ConvertResult,
 
 		for scanner.Scan() {
 			line := scanner.Text()
-			log.Println(line)
 
-			// Wailsのイベント発行: "conversion:log"
 			if len(strings.TrimSpace(line)) > 0 {
+				// Wailsのイベント発行: "conversion:log"
 				wailsRuntime.EventsEmit(a.ctx, "conversion:log", line)
 			}
 		}
 	}()
 
-	// コマンド終了とゴルーチンの完了を待つ
-	err = cmd.Wait()
+	// 待機
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
 	wg.Wait()
 
-	if err != nil {
-		return ConvertResult{}, fmt.Errorf("変換に失敗しました: %w", err)
+	return nil
+}
+
+// 出力パス解決ロジック (隠蔽)
+func (a *App) resolveOutputPath(cfg OutputConfig, refInputPath string, fileID string) (string, error) {
+	var dir string
+	home, _ := os.UserHomeDir()
+
+	// ディレクトリ決定
+	switch cfg.DirType {
+	case "absolute":
+		dir = cfg.CustomDir
+	case "relative": // 入力ファイルからの相対パス
+		if refInputPath == "" {
+			return "", fmt.Errorf("相対パスの基準となる入力がありません")
+		}
+		dir = filepath.Join(filepath.Dir(refInputPath), cfg.CustomDir)
+	case "video":
+		if runtime.GOOS == "windows" {
+			dir = filepath.Join(home, "Videos", "OptiMux")
+		} else {
+			dir = filepath.Join(home, "Movies", "OptiMux")
+		}
+	case "download":
+		dir = filepath.Join(home, "Downloads", "OptiMux")
+	case "temp":
+		// Temp/OptiMux/Intermediate
+		dir = filepath.Join(os.TempDir(), "OptiMux", "Intermediate")
+	default: // "same" or others
+		if refInputPath == "" {
+			return "", fmt.Errorf("基準入力パスがありません")
+		}
+		dir = filepath.Dir(refInputPath)
 	}
 
-	// 生成されたファイルの情報を取得して返す
-	fileInfo, err := os.Stat(outputPath)
-	if err != nil {
-		// 変換は成功したがファイルが見つからないケース（稀だが一応）
-		return ConvertResult{}, fmt.Errorf("出力ファイルの確認に失敗しました: %w", err)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("ディレクトリ作成失敗: %w", err)
 	}
 
-	// 結果を返す
-	return ConvertResult{
-		OutputPath: outputPath,
-		Size:       fileInfo.Size(),
+	// 2. ファイル名決定
+	var filename string
+	switch cfg.NameMode {
+	case "uuid":
+		// ランダムな名前
+		filename = uuid.New().String()
+	case "fiid":
+		// ファイルID
+		filename = fileID
+	case "fixed":
+		// 指定された名前そのまま
+		filename = cfg.NameValue
+	case "auto":
+		// 元ファイル名 + Suffix (例: input_hevc)
+		if refInputPath == "" {
+			return "", fmt.Errorf("ファイル名自動生成の基準入力がありません")
+		}
+		base := strings.TrimSuffix(filepath.Base(refInputPath), filepath.Ext(refInputPath))
+		filename = base + cfg.NameValue
+	}
+
+	// 拡張子付与
+	if cfg.Extension != "" {
+		// ドットが含まれていなければ付ける
+		ext := cfg.Extension
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		filename = fmt.Sprintf("%s%s", filename, ext)
+	}
+
+	return filepath.Join(dir, filename), nil
+}
+
+// 汎用処理実行
+func (a *App) RunProcess(req ProcessRequest) (ProcessResult, error) {
+	// 入力準備
+	var finalInputPath string
+	var tempInputFile string
+
+	if req.Input.Mode == "concat" {
+		tempInputFile = filepath.Join(os.TempDir(), fmt.Sprintf("concat_%s.txt", req.FileID))
+		f, err := os.Create(tempInputFile)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+		for _, p := range req.Input.Paths {
+			fmt.Fprintf(f, "file '%s'\n", p)
+		}
+		f.Close()
+		finalInputPath = tempInputFile
+	} else {
+		if len(req.Input.Paths) == 0 {
+			return ProcessResult{}, fmt.Errorf("入力パスがありません")
+		}
+		finalInputPath = req.Input.Paths[0]
+	}
+
+	// 後始末 (deferで確実に消す)
+	if tempInputFile != "" {
+		defer os.Remove(tempInputFile)
+	}
+
+	// 出力パス解決と引数構築
+	args := []string{}
+	if req.Input.Mode == "concat" {
+		args = append(args, "-f", "concat", "-safe", "0")
+	}
+	args = append(args, "-i", finalInputPath)
+	args = append(args, req.GlobalOptions...)
+
+	type targetInfo struct {
+		Path  string
+		Label string
+	}
+	var targets []targetInfo
+	refPath := ""
+	if len(req.Input.Paths) > 0 {
+		refPath = req.Input.Paths[0]
+	}
+
+	for _, outCfg := range req.Outputs {
+		outPath, err := a.resolveOutputPath(outCfg, refPath, req.FileID)
+		if err != nil {
+			return ProcessResult{}, err
+		}
+
+		targets = append(targets, targetInfo{Path: outPath, Label: outCfg.Label})
+		args = append(args, outCfg.FFmpegOptions...)
+		args = append(args, outPath)
+	}
+
+	args = append(args, "-progress", "pipe:1", "-nostats")
+
+	// 実行 (共通関数呼び出し)
+	if err := a.executeFFmpeg(args); err != nil {
+		return ProcessResult{}, fmt.Errorf("変換処理に失敗しました: %w", err)
+	}
+
+	// 4. 結果収集
+	var results []FileResult
+	for _, t := range targets {
+		info, err := os.Stat(t.Path)
+		size := int64(0)
+		if err == nil {
+			size = info.Size()
+		}
+
+		results = append(results, FileResult{
+			Label: t.Label,
+			Path:  t.Path,
+			Size:  size,
+		})
+	}
+
+	return ProcessResult{Results: results}, nil
+}
+
+// GetAvailableEncoders returns a list of available encoders
+func (a *App) GetAvailableEncoders() (map[string][]string, error) {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	cmd := exec.Command(ffmpegPath, "-encoders")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get encoders: %w", err)
+	}
+
+	videoEncoders := []string{}
+	audioEncoders := []string{}
+
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) < 8 {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+
+		if strings.Contains(line, " V") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				// V..... libx264
+				// simple parsing: finding the one with V flag
+				// standard output: " V....D libx264 ..."
+				// parts[0] is flags, parts[1] is name
+				name := parts[1]
+				if name != "=" {
+					videoEncoders = append(videoEncoders, name)
+				}
+			}
+		} else if strings.Contains(line, " A") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				name := parts[1]
+				if name != "=" {
+					audioEncoders = append(audioEncoders, name)
+				}
+			}
+		}
+	}
+
+	// sort
+	sort.Strings(videoEncoders)
+	sort.Strings(audioEncoders)
+
+	return map[string][]string{
+		"video": videoEncoders,
+		"audio": audioEncoders,
 	}, nil
 }
 
-// UploadChunk: 分割データを受け取りファイルに追記する
-func (a *App) UploadChunk(filename string, dataBase64 string, offset int64) (string, error) {
-	// 保存先: ~/Downloads/OptiMux_Temp
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, "Downloads", "OptiMux_Temp")
-	_ = os.MkdirAll(dir, 0755)
-
-	path := filepath.Join(dir, filename)
-
-	// ファイルを開く (作成 or 追記)
-	flags := os.O_WRONLY | os.O_CREATE
-	if offset == 0 {
-		flags |= os.O_TRUNC // 初回は上書き
-	} else {
-		flags |= os.O_APPEND // 2回目以降は追記
-	}
-
-	f, err := os.OpenFile(path, flags, 0644)
+// GetEncoderDefault returns the default CRF/quality value for a given codec
+func (a *App) GetEncoderDefault(codec string) (int, error) {
+	fmt.Printf("[DEBUG] GetEncoderDefault called for codec: %s\n", codec)
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	// Base64デコード
-	payload := dataBase64
-	if idx := strings.Index(dataBase64, ","); idx != -1 {
-		payload = dataBase64[idx+1:]
+		fmt.Printf("[DEBUG] ffmpeg not found: %v\n", err)
+		return -1, fmt.Errorf("ffmpeg not found: %w", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(payload)
+	// 1. Try parsing help output first (fastest)
+	// regex to find "default" followed by number
+	// captures: "default 23", "default: 23", "default -1"
+	// Case insensitive
+	reHelp := regexp.MustCompile(`(?i)default[:\s]+([-0-9\.]+)`)
+
+	cmd := exec.Command(ffmpegPath, "-h", fmt.Sprintf("encoder=%s", codec))
+	outHelp, _ := cmd.CombinedOutput()
+
+	// Scan line by line to find CRF specific default
+	scanner := bufio.NewScanner(bytes.NewReader(outHelp))
+	parsedVal := -100 // sentinel
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "-crf") || strings.Contains(line, "-global_quality") || strings.Contains(line, "-q:v") {
+			matches := reHelp.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if v, err := strconv.ParseFloat(matches[1], 64); err == nil {
+					parsedVal = int(v)
+					fmt.Printf("[DEBUG] Help matched: %s -> %d\n", line, parsedVal)
+				}
+			}
+		}
+	}
+
+	// If we got a sensible positive value, return it.
+	if parsedVal > 0 {
+		return parsedVal, nil
+	}
+
+	// 2. If help gave -1 or 0 (or nothing), try DRY RUN detection
+	// Run 1 frame text/null encode and grep debug log
+	// ffmpeg -f lavfi -i color=s=64x64:d=0.1 -c:v <codec> -frames:v 1 -f null - -loglevel debug
+
+	debugCmd := exec.Command(ffmpegPath,
+		"-f", "lavfi", "-i", "color=s=64x64:d=0.1",
+		"-c:v", codec,
+		"-frames:v", "1",
+		"-f", "null", "-",
+		"-loglevel", "debug",
+	)
+	debugOut, _ := debugCmd.CombinedOutput()
+
+	// Regex for x265: "CRF-28.0"
+	// Regex for SVT: "CRF / 35.00"
+	// Regex Generic: "global_quality=..." or "q=..." matches might be noisy,
+	// but let's try to find explicit "CRF" or "Quality" lines first.
+	// Also Match "q=-0.0" is meaningless.
+	// We need to look for configuration logs usually printed at start.
+	reDebug := regexp.MustCompile(`(?i)(?:CRF|Quality|q)(?:[:\s/-]+)([0-9\.]+)`)
+
+	scannerDebug := bufio.NewScanner(bytes.NewReader(debugOut))
+	for scannerDebug.Scan() {
+		line := scannerDebug.Text()
+		// Determine if this line contains quality info
+		if strings.Contains(line, "CRF") || strings.Contains(line, "global_quality") {
+			matches := reDebug.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if v, err := strconv.ParseFloat(matches[1], 64); err == nil && v > 0 {
+					return int(v), nil
+				}
+			}
+		}
+	}
+
+	// NO FALLBACK MAP
+	// If we absolutely cannot find anything, return -1.
+	// This indicates "Unknown Default" to the UI, so it can handle it (e.g. disable "Use Default" or just show blank).
+	return -1, nil
+}
+
+// GetAvailableFormats returns a list of available formats (containers)
+func (a *App) GetAvailableFormats() ([]string, error) {
+	fixPath()
+	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("ffmpeg not found: %w", err)
 	}
 
-	_, err = f.Write(decoded)
-	return path, err
+	cmd := exec.Command(ffmpegPath, "-formats")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get formats: %w", err)
+	}
+
+	formats := []string{}
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, " E ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				name := parts[1]
+				formats = append(formats, name)
+			}
+		}
+	}
+	sort.Strings(formats)
+	return formats, nil
+}
+
+// RunExifTool executes exiftool to copy metadata
+func (a *App) RunExifTool(src, dst string) error {
+	fixPath()
+	exiftoolPath, err := exec.LookPath("exiftool")
+	if err != nil {
+		return fmt.Errorf("exiftool not found")
+	}
+
+	// -TagsFromFile src -all:all dst -overwrite_original
+	cmd := exec.Command(exiftoolPath, "-TagsFromFile", src, "-all:all", dst, "-overwrite_original")
+	return cmd.Run()
 }

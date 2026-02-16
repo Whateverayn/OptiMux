@@ -1,12 +1,34 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { AnalyzeMedia, ConvertVideo, UploadChunk, GetOSName } from "../wailsjs/go/main/App.js";
-import { EventsOn, EventsOff, OnFileDrop } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
-import { MediaInfo, BatchStatus } from "./types.js";
+import {
+    AnalyzeMedia,
+    RunProcess,
+    UploadChunk,
+    RequestDelete,
+    ConfirmDelete,
+    CancelDelete,
+    GetOSName,
+    SelectVideoFiles,
+    RunExifTool,
+    GetAvailableEncoders,
+    GetAvailableFormats
+} from "../wailsjs/go/main/App.js";
+import { EventsOn, EventsOff, OnFileDrop, Quit } from "../wailsjs/runtime/runtime.js"; // D&Dイベントのためのインポート
+import { createConvertRequest } from "./utils/commandFactory.js";
+import { generateDualFFTasks } from "./utils/recipes/dualff.js";
+import { generateNormalTasks } from "./utils/recipes/normal.js";
+import { generateResizeTasks } from "./utils/recipes/resize.js";
+import { MediaInfo, BatchStatus, ProcessResult, ProcessRequest } from "./types.js";
+
+// JobContext
+import { JobProvider, useJob } from './contexts/JobContext.js';
 
 // Components
 import TitleBar from './components/layout/TitleBar.js';
 import StatusBar from './components/layout/StatusBar.js';
+import FunctionKeyFooter from './components/layout/FunctionKeyFooter.js';
+import DeleteConfirmDialog, { DeleteTarget } from './components/ui/DeleteConfirmDialog.js';
+import RecipeSelectDialog from './components/ui/RecipeSelectDialog.js';
 import SetupView from './components/views/SetupView.js';
 import ProcessingView from './components/views/ProcessingView.js';
 import SplashScreen from './components/views/SplashScreen.js';
@@ -20,47 +42,259 @@ type ProgressEvent = {
 };
 
 function App() {
-    // データ
-    const [fileList, setFileList] = useState<MediaInfo[]>([]);
-    const [startTime, setStartTime] = useState<number | null>(null);
+    // ログの自動スクロール用
+    // const logEndRef = useRef<HTMLDivElement>(null);
+
+    // 常に最新のfileListを保持するRef
+    // useEffect(() => {
+    //     fileListRef.current = fileList;
+    // }, [fileList]);
+
+    // --- Actions ---
+
+    // 時間文字列 (HH:MM:SS.ms) を 秒(number) に変換
+    // const parseTimeToSeconds = (timeStr: string): number => {
+    //     const parts = timeStr.split(':');
+    //     if (parts.length < 3) return 0;
+    //     const h = parseFloat(parts[0]);
+    //     const m = parseFloat(parts[1]);
+    //     const s = parseFloat(parts[2]);
+    //     return (h * 3600) + (m * 60) + s;
+    // };
+
+    // --- Events ---
+
+    // useEffect(() => {
+    //     // ドラッグ中の演出用イベント
+    //     const onDragEnter = () => setIsDragging(true);
+    //     const onDragLeave = () => setIsDragging(false);
+
+    //     EventsOn('wails:drag:enter', onDragEnter);
+    //     EventsOn('wails:drag:leave', onDragLeave);
+
+    //     return () => {
+    //         EventsOff('wails:drag:enter');
+    //         EventsOff('wails:drag:leave');
+    //     };
+    // }, [currentView]); // currentViewが変わるたびに判定
+
+    // ログ更新時に下までスクロール
+    // useEffect(() => {
+    //     logEndRef.current?.scrollIntoView({ behavior: "auto" });
+    // }, [log]);
+
+    // 進捗リスナー (Processing時は taskList を更新)
+    // useEffect(() => {
+    //     const onProgress = (data: ProgressEvent) => {
+    //         if (currentFileIdRef.current === null) return;
+    //         const targetId = currentFileIdRef.current;
+
+    //         // taskList を更新する
+    //         setTaskList(prevList => {
+    //             return prevList.map(item => {
+    //                 if (item.id === targetId && item.duration > 0) {
+    //                     const scale = item.timeScale || 1.0;
+    //                     const expectedDuration = item.duration / scale;
+    //                     const percent = Math.min(100, (data.timeSec / expectedDuration) * 100);
+    //                     return {
+    //                         ...item,
+    //                         progress: percent,
+    //                         encodedSize: data.size
+    //                     };
+    //                 }
+    //                 return item;
+    //             });
+    //         });
+    //     };
+
+    //     EventsOn("conversion:progress", onProgress);
+    //     return () => EventsOff("conversion:progress");
+    // }, []);
+
+    // ヘルパー: ステータス更新用
+    // const updateTaskStatus = (id: string, status: any, progress: number) => {
+    //     setTaskList(prev => prev.map(t => t.id === id ? { ...t, status, progress } : t));
+    // };
+
+    return (
+        <JobProvider>
+            <AppContent />
+        </JobProvider>
+    )
+}
+
+function AppContent() {
+    // --- Context Hooks ---
+    const {
+        files,          // Setup用のファイルリスト
+        taskList,       // Processing用のタスクリスト
+        batchStatus,    // 状態 (Context管理)
+        actions,        // 操作用メソッド群
+        metrics,         // 各種統計情報
+        log
+    } = useJob();
+
+    // --- Local State ---
+    const [currentView, setCurrentView] = useState<AppView>('setup');
+
+    // UI State
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [deleteTargets, setDeleteTargets] = useState<DeleteTarget[] | null>(null);    // Lift-up: 削除モーダル状態
+    const [isRecipeOpen, setIsRecipeOpen] = useState(false);
+    const [showSplash, setShowSplash] = useState(true);
+    const [isDragging, setIsDragging] = useState(false);
 
     // 設定
     const [codec, setCodec] = useState("hevc");
     const [audio, setAudio] = useState("copy");
 
-    // 画面状態
-    const [currentView, setCurrentView] = useState<AppView>('setup');
-
-    const [batchStatus, setBatchStatus] = useState<BatchStatus>('idle');
-    const [log, setLog] = useState<string[]>([]);
-    const [isDragging, setIsDragging] = useState(false);
-    const [showSplash, setShowSplash] = useState(true);
-
-    // 現在処理中のファイルのインデックスを追跡するRef
+    // 参照用Ref
+    const taskResults = useRef<Map<string, ProcessResult>>(new Map());
     const currentFileIdRef = useRef<string | null>(null);
 
-    // ログの自動スクロール用
-    const logEndRef = useRef<HTMLDivElement>(null);
+    // Contextの値をRefに同期させる (リスナー内での参照用)
+    const filesRef = useRef<MediaInfo[]>([]);       // 重複チェック用
+    const taskListRef = useRef<MediaInfo[]>([]);
 
-    // 時間文字列 (HH:MM:SS.ms) を 秒(number) に変換
-    const parseTimeToSeconds = (timeStr: string): number => {
-        const parts = timeStr.split(':');
-        if (parts.length < 3) return 0;
-        const h = parseFloat(parts[0]);
-        const m = parseFloat(parts[1]);
-        const s = parseFloat(parts[2]);
-        return (h * 3600) + (m * 60) + s;
+    // Contextのfilesが変わったらRefも更新 (重複チェックロジックのため)
+    useEffect(() => { filesRef.current = files; }, [files]);
+    useEffect(() => { taskListRef.current = taskList; }, [taskList]);
+
+    // --- Actions ---
+
+    // ファイル追加
+    const addFilesToList = async (
+        newPaths: string[],
+        isTempFile: boolean = false,
+        outputType: 'same' | 'video' | 'temp' = 'same'
+    ) => {
+        // 重複チェック: パス名でチェック
+        const currentPaths = new Set(filesRef.current.map(f => f.path));
+        const uniquePaths = newPaths.filter(p => !currentPaths.has(p));
+
+        if (uniquePaths.length === 0) return;
+
+        const newItems: MediaInfo[] = uniquePaths.map(path => ({
+            id: crypto.randomUUID(),
+            path: path,
+            size: 0,
+            hasVideo: false, hasAudio: false, duration: 0,
+            status: 'waiting', progress: 0,
+            isTemp: isTempFile,
+            outputType: outputType,
+            taskType: 'convert'
+        }));
+
+        // Contextのアクションを呼ぶ
+        actions.addFiles(newItems);
+
+        // 解析
+        for (const item of newItems) {
+            AnalyzeMedia(item.path)
+                .then(result => {
+                    // Contextのアクションで更新
+                    actions.updateFile(item.id, { ...result, status: 'waiting' });
+                })
+                .catch(err => {
+                    // 失敗したらエラー状態に
+                    console.error(err);
+                    actions.updateFile(item.id, { status: 'error' });
+                });
+        }
     };
 
-    // BlobをBase64に変換
-    const readFileAsBase64 = (blob: Blob): Promise<string> => {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
+    // ファイル選択ダイアログ (F3)
+    const handleOpenFile = async () => {
+        try {
+            // Goのダイアログを呼び出す
+            const files = await SelectVideoFiles();
+            if (files && files.length > 0) {
+                // isTemp: false, outputType: 'same'
+                await addFilesToList(files, false, "same");
+            }
+        } catch (err) {
+            console.error("Failed to select files:", err);
+        }
     };
+
+    // 削除フロー開始 (F8)
+    const startBatchDelete = async () => {
+        if (selectedIds.size === 0) return;
+
+        // Setupならfiles, ProcessingならtaskListから対象を探す
+        const targetList = currentView === 'setup' ? files : taskList;
+        const filesToDelete = targetList.filter(f => selectedIds.has(f.id));
+
+        // 分類
+        const tempFiles = filesToDelete.filter(f => f.isTemp);
+        const normalFiles = filesToDelete.filter(f => !f.isTemp);
+
+        // 通常ファイル: 即削除
+        if (normalFiles.length > 0) {
+            const normalIds = normalFiles.map(f => f.id);
+            // Contextから削除 (Processing画面なら taskList から消すフラグを立てる)
+            actions.removeFiles(normalIds, currentView === 'processing');
+
+            // 選択解除 (Tempがなければ全解除, あればTemp以外を解除)
+            setSelectedIds(prev => {
+                const next = new Set(prev);
+                normalIds.forEach(id => next.delete(id));
+                return next;
+            });
+        }
+
+        // Tempファイル: 確認ダイアログ
+        if (tempFiles.length > 0) {
+            const targets: DeleteTarget[] = [];
+            try {
+                for (const file of tempFiles) {
+                    if (file.path) {
+                        // Windows一時ファイルなら物理削除リクエスト
+                        const token = await RequestDelete(file.path);
+                        targets.push({ file, token });
+                    }
+                }
+                setDeleteTargets(targets);  // ダイアログ表示
+            } catch (e) { console.error(e); }
+        }
+    };
+
+    // 削除実行 (Confirm)
+    const confirmBatchDelete = async () => {
+        if (!deleteTargets) return;
+        const deletedIds: string[] = [];
+
+        for (const target of deleteTargets) {
+            // 物理削除実行
+            if (target.token) await ConfirmDelete(target.token);
+            // リスト更新
+            deletedIds.push(target.file.id);
+        }
+
+        // Contextから削除
+        actions.removeFiles(deletedIds, currentView === 'processing');
+
+        setSelectedIds(new Set());  // 選択解除
+        setDeleteTargets(null);     // ダイアログ閉じる
+
+        // Processing画面で全削除された場合
+
+        // Processing画面なら, 削除が終わったので完了状態へ
+        // if (currentView === 'processing') {
+        //     finishAll();
+        // }
+    };
+
+    // 削除キャンセル
+    const cancelBatchDelete = async () => {
+        if (!deleteTargets) return;
+        for (const target of deleteTargets) {
+            if (target.token) await CancelDelete(target.token);
+        }
+        setDeleteTargets(null);
+    };
+
+    // --- ユーティリティ ---
 
     // チャンクサイズを動的に計算する
     const calculateChunkSize = (fileSize: number): number => {
@@ -75,6 +309,16 @@ function App() {
         if (target < MIN_CHUNK) return MIN_CHUNK;
         if (target > MAX_CHUNK) return MAX_CHUNK;
         return target;
+    };
+
+    // BlobをBase64に変換
+    const readFileAsBase64 = (blob: Blob): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
     };
 
     // ファイルを分割してGoにアップロード
@@ -103,12 +347,210 @@ function App() {
         return filePath;
     };
 
-    // 環境判定 (Mac && 非Retina)
+    // --- タスクランナー ---
+    const runComplexTasks = async (generatedTasks: MediaInfo[]) => {
+        // Contextの状態を更新
+        actions.setBatchStatus('converting');
+        actions.setStartTime(Date.now());       // 全体の開始時刻
+        actions.setTaskList(generatedTasks);    // 生成したタスクをContextへ
+
+        actions.addLog(`🥁 Starting process... at ${new Date().toISOString()}`);
+        taskResults.current.clear();
+        // SetupViewからProcessingViewへ遷移
+        setCurrentView('processing');
+
+        // 実行ループ
+        const processingTasks = generatedTasks.filter(t => t.taskType !== 'trash');
+
+        // 全ファイルを順次処理
+        for (let i = 0; i < processingTasks.length; i++) {
+            const task = processingTasks[i];
+            // 処理開始前にRefを更新
+            currentFileIdRef.current = task.id;
+
+            // Contextのタスク状態更新
+            actions.updateTask(task.id, {
+                status: 'processing',   // ここでProcessingにする
+                progress: 0,
+                startedAt: Date.now(),  // 開始時刻を記録
+                encodedSize: 0
+            });
+
+            try {
+                // --- ExifTool Task ---
+                if (task.taskType === 'exiftool') {
+                    actions.addLog(`[RUN] ExifTool: Copying metadata...`);
+
+                    // 1. Source (Original)
+                    const srcPath = task.processRequest?.input.paths[0];
+                    if (!srcPath) throw new Error("ExifTool: Source path not found");
+
+                    // 2. Destination (Output of dependent task)
+                    let dstPath = "";
+                    if (task.dependencyRefs && task.dependencyRefs.length > 0) {
+                        const refId = task.dependencyRefs[0].split(':')[1];
+                        const prevResult = taskResults.current.get(refId);
+                        const mainOut = prevResult?.results.find((r: any) => r.label === 'main');
+                        dstPath = mainOut?.path || "";
+                    }
+                    if (!dstPath) throw new Error("ExifTool: Destination path not found (Dependency failed)");
+
+                    // 実行
+                    await RunExifTool(srcPath, dstPath);
+
+                    actions.updateTask(task.id, {
+                        status: 'done',
+                        progress: 100,
+                        completedAt: Date.now()
+                    });
+                    actions.addLog(`>> [SUCCESS] ExifTool Finished`);
+                    continue; // 次のタスクへ
+                }
+
+                // --- Convert / Concat Task ---
+
+                // Request 準備
+                if (!task.processRequest) throw new Error("No process request");
+                // リクエストのディープコピーを作成
+                let req = JSON.parse(JSON.stringify(task.processRequest));
+
+                // 依存パスの解決 (Concat用)
+                if (task.taskType === 'concat' && task.dependencyRefs) {
+                    const resolvedPaths: string[] = [];
+
+                    for (const ref of task.dependencyRefs) {
+                        if (ref.startsWith("ref:")) {
+                            const targetId = ref.split(':')[1];
+                            const prevResult = taskResults.current.get(targetId);
+
+                            if (prevResult) {
+                                // temp_chunk ラベルを持つ結果を探す
+                                let chunk = prevResult?.results.find((r: any) => r.label === 'temp_chunk');
+                                if (!chunk) chunk = prevResult?.results.find((r: any) => r.label === 'main'); // mainフォールバック
+                                if (chunk) resolvedPaths.push(chunk.path);
+                            }
+                        }
+                    }
+
+                    if (resolvedPaths.length === 0) {
+                        throw new Error("Dependency resolution failed: No inputs found.");
+                    }
+
+                    req.input.paths = resolvedPaths;
+                    console.log("Resolved Concat Inputs:", resolvedPaths);
+                }
+
+                actions.addLog(`[RUN] ${task.taskType}: ${task.path}`);
+
+                // 実行
+                const result = await RunProcess(req);
+                // 結果保存
+                taskResults.current.set(task.id, result);
+
+                // 完了更新
+                const mainOut = result.results.find((r: any) => r.label === 'main');
+
+                // Context更新
+                actions.updateTask(task.id, {
+                    status: 'done',
+                    progress: 100,
+                    completedAt: Date.now(),
+                    encodedSize: mainOut?.size || 0,
+                    outputPath: mainOut?.path,
+                });
+
+                if (mainOut) actions.addLog(`>> [SUCCESS] Finished: ${mainOut.path}`);
+
+            } catch (error) {
+                console.error(error);
+                actions.updateTask(task.id, { status: 'error' });
+                actions.addLog(`>> [ERROR] Failed: ${error}`);
+                // エラー時はループを抜けて中断する
+                break;
+            }
+        }
+
+        // 全処理終了
+        currentFileIdRef.current = null;
+        actions.addLog("🌵 Conversion tasks finished");
+
+        // Trash Task
+        const trashTasks = generatedTasks.filter(t => t.taskType === 'trash');
+        if (trashTasks.length > 0) {
+            actions.addLog("🗑️ Preparing deletion confirmation...");
+            const targets: DeleteTarget[] = [];
+
+            // 全ての削除対象に対してトークンを発行
+            for (const task of trashTasks) {
+                try {
+                    const token = await RequestDelete(task.path);
+                    targets.push({ file: task, token });
+                } catch (e) {
+                    console.error("Failed to request delete:", e);
+                    // ファイルが既にない場合などはエラーになるのでスキップ
+                    actions.updateTask(task.id, { status: 'error' });
+                }
+            }
+            if (targets.length > 0) {
+                // ダイアログを表示
+                setDeleteTargets(targets);
+            } else {
+                // 削除対象がなかった(既に消えてた等)ので終了
+                finishAll();
+            }
+        } else {
+            // 削除タスクがなければ終了
+            finishAll();
+        }
+    };
+
+    const finishAll = () => {
+        actions.setBatchStatus('idle');
+        actions.addLog("👺 All operations completed 👹");
+    };
+
+    // 通常変換開始
+    const startConversion = () => {
+        if (files.length === 0) return;
+        // fileList から 通常変換タスク を生成する
+        const tasks = generateNormalTasks(files, { codec, audio });
+        runComplexTasks(tasks);
+    };
+
+    // レシピ実行
+    const handleRecipeRun = (recipeId: string, params: any) => {
+        setIsRecipeOpen(false);         // ダイアログ閉じる
+        if (files.length === 0) return;
+
+        let tasks: MediaInfo[] = [];
+        // レシピIDで分岐
+        if (recipeId === 'dual_ff') {
+            tasks = generateDualFFTasks(files, {
+                targetDuration: params.targetDuration || 60,
+                trashOriginal: params.trashOriginal || false,
+                rotation: params.rotation || "90"
+            });
+        } else if (recipeId === 'resize') {
+            tasks = generateResizeTasks(files, {
+                resolution: params.resolution || 0,
+                videoCodec: params.videoCodec || 'libsvtav1',
+                audioCodec: params.audioCodec || 'copy',
+                container: params.container || 'mp4',
+                crf: params.crf,
+                keepMetadata: params.keepMetadata !== false // default true
+            });
+        }
+        if (tasks.length > 0) runComplexTasks(tasks);
+    };
+
+    // --- Events ---
+
+    // 環境判定
     useEffect(() => {
         const setupFontSmoothing = async () => {
             // GoからOS名を取得
             const os = await GetOSName();
-            if (os !== 'darwin') return; // Mac以外は何もしない
+            if (os !== 'darwin') return; // macOS以外は何もしない
 
             // スムージングクラスを切り替える関数
             const updateSmoothing = () => {
@@ -122,17 +564,16 @@ function App() {
                     document.body.classList.remove('force-smoothing');
                     console.log("Retina detected: Smoothing Disabled");
                 }
-            };
+            }
 
             // 初回実行
             updateSmoothing();
 
-            // DPIの変化を監視する (ウィンドウ移動対策)
+            // DPIの変化を監視する
             const mq = window.matchMedia('screen and (min-resolution: 2dppx)');
 
             // モダンブラウザ用リスナー
             const handleChange = () => updateSmoothing();
-
             mq.addEventListener("change", handleChange);
 
             // クリーンアップ
@@ -147,292 +588,150 @@ function App() {
     // useEffectでWailsのイベントリスナーを登録
     useEffect(() => {
         // Goからの準備完了合図を待つ
-        const onReady = () => {
-            setShowSplash(false);
+        const onReady = () => setShowSplash(false);
+
+        // Goからの進捗通知
+        const onProgress = (data: ProgressEvent) => {
+            if (!currentFileIdRef.current) return;
+            const targetId = currentFileIdRef.current;
+
+            const isProcessing = currentView === 'processing';
+            const targetList = isProcessing ? taskListRef.current : filesRef.current;
+
+            const targetTask = targetList.find(t => t.id === targetId);
+
+            if (targetTask) {
+                const targetDuration = targetTask.expectedDuration || targetTask.duration;
+
+                // ゼロ除算対策
+                const percent = targetDuration > 0
+                    // 時間から進捗率を計算
+                    ? Math.min(100, (data.timeSec / targetDuration) * 100)
+                    : 0;
+
+                // 第3引数(isProcessing)が true なら TaskList, false なら Files を更新
+                actions.updateFile(targetId, {
+                    progress: percent,
+                    encodedSize: data.size
+                }, isProcessing);
+            }
         };
-        EventsOn("app:ready", onReady);
+
+        // 進捗ログの受信
+        const onLog = (msg: string) => actions.addLog(msg);
 
         // Wailsからのファイルドロップイベントを受け取るリスナー (除くWindows)
         const onFileDrop = async (x: number, y: number, files: string[]) => {
             console.log("👺 Wails Drop Event Fired", x, y, files);
-
             // 処理中は受け付けない
             if (currentView !== 'setup') return;
-
             setIsDragging(false);
-
             // ループ処理
             if (files && files.length > 0) {
-                // IDを発行してリストに追加
-                const newItems: MediaInfo[] = files.map(path => ({
-                    id: crypto.randomUUID(), // ここでID発行
-                    path: path,
-                    size: 0,
-                    hasVideo: false,
-                    hasAudio: false,
-                    duration: 0,
-                    status: 'waiting',
-                    progress: 0
-                }));
-                setFileList(prev => [...prev, ...newItems]);
-
-                for (const item of newItems) {
-                    try {
-                        const result = await AnalyzeMedia(item.path);
-                        setFileList(prev => prev.map(f =>
-                            f.id === item.id ? { ...f, ...result } : f
-                        ));
-                    } catch (error) {
-                        console.error(`Error analyzing ${item.path}:`, error);
-                        setFileList(prev => prev.map(f =>
-                            f.id === item.id ? { ...f, status: 'error' } : f
-                        ));
-                    }
-                }
-            } else {
-                console.log("ELSE");
+                await addFilesToList(files, false, 'same');
             }
         };
 
-        // ドラッグ中の演出用イベント
-        const onDragEnter = () => setIsDragging(true);
-        const onDragLeave = () => setIsDragging(false);
-
-        // 進捗ログの受信
-        const onLog = (msg: string) => {
-            // ログ表示用
-            setLog(prev => [...prev.slice(-100), msg]);
-
-            // 現在処理中のファイルがない場合は無視
-            // if (currentFileIdRef.current === null) return;
-            // const targetId = currentFileIdRef.current;
-
-            // 正規表現で time=XX:XX:XX.XX を探す
-            // const match = msg.match(/size=\s*(\d+)kB.*time=\s*(\d{2}:\d{2}:\d{2}\.\d{2})/);
-
-            // if (match) {
-            //     const sizeKb = parseInt(match[1], 10); // KB単位
-            //     const currentTimeStr = match[2];
-            //     const currentSeconds = parseTimeToSeconds(currentTimeStr);
-
-            //     setFileList(prevList => {
-            //         return prevList.map(item => {
-            //             // IDが一致するアイテムだけ更新
-            //             if (item.id === targetId && item.duration > 0) {
-            //                 // 進捗率計算
-            //                 const percent = Math.min(100, (currentSeconds / item.duration) * 100);
-            //                 // 状態更新
-            //                 return {
-            //                     ...item,
-            //                     progress: percent,
-            //                     encodedSize: sizeKb * 1024 // Byteに変換して保存
-            //                 };
-            //             }
-            //             return item;
-            //         });
-            //     });
-            // }
-        };
-
-        // 進捗データ専用のリスナー
-        const onProgress = (data: ProgressEvent) => {
-            if (currentFileIdRef.current === null) return;
-            const targetId = currentFileIdRef.current;
-
-            setFileList(prevList => {
-                return prevList.map(item => {
-                    if (item.id === targetId && item.duration > 0) {
-                        // 時間から進捗率を計算
-                        const percent = Math.min(100, (data.timeSec / item.duration) * 100);
-                        return {
-                            ...item,
-                            progress: percent,
-                            encodedSize: data.size // Goから正確なバイト数が来る
-                        };
-                    }
-                    return item;
-                });
-            });
-        };
-
-        // イベント登録
-        EventsOn('wails:file-drop', onFileDrop);
-        EventsOn('wails:drag:enter', onDragEnter);
-        EventsOn('wails:drag:leave', onDragLeave);
-
-        EventsOn("conversion:log", onLog); // ログ用
-        EventsOn("conversion:progress", onProgress); // 数値用
+        EventsOn("app:ready", onReady);
+        EventsOn('wails:file-drop', onFileDrop);        // イベント登録
+        EventsOn("conversion:log", onLog);              // ログ用
+        EventsOn("conversion:progress", onProgress);    // 数値用
 
         // クリーンアップ (コンポーネント削除時にリスナー解除)
         return () => {
+            EventsOff("app:ready");
             EventsOff('wails:file-drop');
-            EventsOff('wails:drag:enter');
-            EventsOff('wails:drag:leave');
             EventsOff("conversion:log");
             EventsOff("conversion:progress");
-            EventsOff("app:ready");
         };
-    }, [currentView]); // currentViewが変わるたびに判定
+    }, [currentView])
 
-    // ログ更新時に下までスクロール
-    useEffect(() => {
-        logEndRef.current?.scrollIntoView({ behavior: "auto" });
-    }, [log]);
-
-    // HTML5標準のドロップハンドラ (Windows用)
+    // HTML5 Drop Handler (Windows用)
     const handleHtmlDrop = async (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         e.stopPropagation();
-
         if (currentView !== 'setup') return;
         setIsDragging(false);
 
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            // コピー開始時刻を記録
-            setStartTime(Date.now());
+            // コピー開始時刻
+            actions.setStartTime(Date.now());
             // ステータス
-            setBatchStatus('importing');
+            actions.setBatchStatus('importing');
 
             const droppedFiles = Array.from(e.dataTransfer.files);
 
-            // 全ファイルの枠を作成してリストに追加
-            const newEntries: MediaInfo[] = droppedFiles.map(file => {
-                const path = (file as any).path || "";
-                return {
-                    id: crypto.randomUUID(), // ID発行
-                    path: path,
-                    size: file.size,
-                    hasVideo: false,
-                    hasAudio: false,
-                    duration: 0,
-                    // パスがあればwaiting, なければuploading
-                    status: path ? 'waiting' : 'uploading',
-                    progress: 0
-                };
+            // 重複チェック (ファイル名で)
+            const currentFileNames = new Set(filesRef.current.map(f => f.path.split(/[/\\]/).pop() || f.path));
+            const validFiles: File[] = [];
+            const newEntries: MediaInfo[] = [];
+
+            droppedFiles.forEach(file => {
+                if (currentFileNames.has(file.name)) {
+                    console.warn(`Duplicate filename ignored: ${file.name}`);
+                } else {
+                    validFiles.push(file);
+                    currentFileNames.add(file.name);
+
+                    newEntries.push({
+                        id: crypto.randomUUID(),    // ID発行
+                        path: "", // Windowsなのでまだパスなし
+                        size: file.size,
+                        hasVideo: false, hasAudio: false, duration: 0,
+                        status: 'uploading', // 最初はアップロード中
+                        isTemp: true,       // WindowsコピーなのでTemp
+                        outputType: 'video', // 出力はビデオフォルダへ
+                        progress: 0,
+                        taskType: 'convert'
+                    });
+                }
             });
 
-            // 既存リストの後ろに追加
-            setFileList(prev => [...prev, ...newEntries]);
+            if (validFiles.length === 0) {
+                actions.setBatchStatus('idle');
+                return;
+            }
 
-            // 順次処理
-            for (let i = 0; i < droppedFiles.length; i++) {
-                const file = droppedFiles[i];
-                const entry = newEntries[i]; // 対応するエントリ
+            // Contextに追加
+            actions.addFiles(newEntries);
+
+            // 順次アップロード & 解析
+            for (let i = 0; i < validFiles.length; i++) {
+                const file = validFiles[i];
+                const entry = newEntries[i];    // 対応するエントリ
 
                 try {
-                    // まずパスがあるか確認
-                    let finalPath = entry.path;
+                    console.log(`🦔 Streaming ${file.name} to temp storage...`);
+                    // UploadChunk (進捗はコールバックで更新)
+                    const finalPath = await uploadFileInChunks(file, (percent) => {
+                        actions.updateFile(entry.id, { progress: percent });
+                    });
+                    console.log("👺 Saved to:", finalPath);
 
-                    // パスがない場合 (Windowsなど) は分割アップロードを実行
-                    if (!finalPath) {
-                        console.log(`🦔 Streaming ${file.name} to temp storage...`);
-
-                        finalPath = await uploadFileInChunks(file, (percent) => {
-                            // IDを指定して進捗更新
-                            setFileList(prev => prev.map(item =>
-                                item.id === entry.id ? { ...item, progress: percent } : item
-                            ));
-                        });
-                        console.log("👺 Saved to:", finalPath);
-                    }
-
-                    // 解析実行
+                    // 解析
                     const result = await AnalyzeMedia(finalPath);
 
-                    // IDを指定して結果を反映
-                    setFileList(prev => prev.map(item =>
-                        item.id === entry.id ? {
-                            ...item,
-                            ...result, // 解析結果(Duration等)をマージ
-                            path: finalPath, // 確定したパス
-                            status: 'waiting',
-                            progress: 0
-                        } : item
-                    ));
+                    // 結果反映 (Waitingへ)
+                    actions.updateFile(entry.id, {
+                        ...result,
+                        path: finalPath,
+                        status: 'waiting',
+                        progress: 0
+                    });
+
                 } catch (error) {
-                    console.error(`Error processing ${file.name}:`, error);
-                    // IDを指定してエラー状態へ
-                    setFileList(prev => prev.map(item =>
-                        item.id === entry.id ? { ...item, status: 'error' } : item
-                    ));
+                    console.error(error);
+                    actions.updateFile(entry.id, { status: 'error' });
                 }
             }
-            setBatchStatus('idle');
-            setStartTime(null);
-        }
-    };
 
-    // 変換実行ボタンの処理
-    const startConversion = async () => {
-        if (fileList.length === 0) {
-            return;
-        }
-        setCurrentView('processing');
-        setBatchStatus('converting');
-        setLog(["Starting process..."]);
-        setStartTime(Date.now()); // 全体の開始時刻
-
-        // 全ファイルを順次処理
-        for (const item of fileList) {
-            // 処理開始前にRefを更新
-            currentFileIdRef.current = item.id;
-
-            // ステータスをProcessingに変更
-            setFileList(prev => prev.map(f =>
-                f.id === item.id ? {
-                    ...f,
-                    status: 'processing',
-                    progress: 0,
-                    startedAt: Date.now(), // ここで刻む
-                    encodedSize: 0
-                } : f
-            ));
-
-            try {
-                setLog(prev => [...prev, `[INFO] Converting: ${item.path}...`]);
-
-                // 結果を受け取る
-                // Go側で (ConvertResult, error) を返すよ
-                // JS側では Promise<ConvertResult> が返ってくる
-                const result = await ConvertVideo(item.path, {
-                    codec: codec,
-                    audio: audio,
-                    extension: "mp4"
-                });
-
-                // 完了したらDoneにする
-                setFileList(prev => prev.map(f =>
-                    f.id === item.id ? {
-                        ...f,
-                        status: 'done',
-                        progress: 100,
-                        completedAt: Date.now(), // 終了時刻を記録
-                        encodedSize: result.size, // 確定したファイルサイズで上書きする
-                        path: result.outputPath, // 確定したパスで上書きする
-                    } : f
-                ));
-                setLog(prev => [...prev, `>> [SUCCESS] Finished: ${item.path}`]);
-            } catch (error) {
-                // エラー
-                setFileList(prev => prev.map(f =>
-                    f.id === item.id ? { ...f, status: 'error' } : f
-                ));
-                setLog(prev => [...prev, `>> [ERROR] Failed: ${item.path} - ${error}`]);
-            }
+            actions.setBatchStatus('idle');
+            actions.setStartTime(null);
         }
 
-        // 全処理終了
-        currentFileIdRef.current = null;
-        setBatchStatus('idle');
-        setLog(prev => [...prev, "👺 All tasks completed 👹"])
     };
 
-    // 処理開始
-    const handleStart = () => {
-        setCurrentView('processing');
-        // 後で実装
-    };
-
+    // --- Render ---
     return (
         <div
             className='window w-full h-full flex flex-col'
@@ -440,6 +739,7 @@ function App() {
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleHtmlDrop}
         >
+
             {/* スプラッシュスクリーンの条件付きレンダリング */}
             {showSplash && <SplashScreen />}
 
@@ -452,31 +752,66 @@ function App() {
                 <div className="flex-1 p-1 overflow-hidden">
                     {currentView === 'setup' ? (
                         <SetupView
-                            files={fileList}
-                            codec={codec}
-                            setCodec={setCodec}
-                            audio={audio}
-                            setAudio={setAudio}
+                            files={files} // Contextのデータを渡す
+                            selectedIds={selectedIds}
+                            onSelectionChange={setSelectedIds}
+                            onDeleteReq={startBatchDelete}
+                            codec={codec} setCodec={setCodec}
+                            audio={audio} setAudio={setAudio}
                             onStart={startConversion}
+                            onOpenReq={handleOpenFile}
+                            onOpenRecipeDialog={() => setIsRecipeOpen(true)}
                         />
                     ) : (
                         <ProcessingView
-                            files={fileList}
-                            log={log}                               // ログを渡す
-                            batchStatus={batchStatus}               // 状態を渡す
-                            onBack={() => setCurrentView('setup')}
+                            onBack={() => {
+                                setCurrentView('setup');
+                                actions.setBatchStatus('idle');
+                                actions.clearAll(); // またはログクリアなど
+                            }}
                         />
                     )}
                 </div>
             </div>
+
             {/* Footer */}
-            <StatusBar
-                fileList={fileList}
-                batchStatus={batchStatus}
-                startTime={startTime}
+            <FunctionKeyFooter
+                mode={currentView}
+                canRun={files.length > 0}
+                canDelete={selectedIds.size > 0}
+                onOpen={handleOpenFile}
+                onRun={startConversion}
+                onRunAdv={() => setIsRecipeOpen(true)}
+                onDelete={startBatchDelete}             // F8で発火
+                onBack={() => {
+                    if (currentView === 'processing') {
+                        // 戻る処理
+                        setCurrentView('setup');
+                        actions.setBatchStatus('idle');
+                    } else {
+                        // セットアップ画面ならアプリ終了
+                        Quit();
+                    }
+                }}
+            />
+
+            {/* StatusBarはProps不要 (内部でuseJobする) */}
+            <StatusBar />
+
+            {/* Modals */}
+            <RecipeSelectDialog
+                isOpen={isRecipeOpen}
+                onRun={handleRecipeRun}
+                onCancel={() => setIsRecipeOpen(false)}
+            />
+            <DeleteConfirmDialog
+                targets={deleteTargets || []}
+                isOpen={!!deleteTargets}
+                onConfirm={confirmBatchDelete}
+                onCancel={cancelBatchDelete}
             />
         </div>
-    )
+    );
 }
 
 export default App

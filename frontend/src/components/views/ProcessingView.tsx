@@ -1,12 +1,10 @@
 import React, { useEffect, useRef } from 'react';
-import { MediaInfo, BatchStatus } from "../../types.js";
+import { MediaInfo } from "../../types.js";
 import ProgressBar from '../ui/ProgressBar.js';
 import FluentDashboard, { DashboardStats } from "./FluentDashboard.js";
+import { useJob } from '../../contexts/JobContext.js';
 
 interface Props {
-    files: MediaInfo[];
-    log: string[];          // 親からログを受け取る
-    batchStatus: BatchStatus;  // 処理中かどうか
     onBack: () => void;     // 戻る ボタン
 }
 
@@ -30,7 +28,9 @@ const formatTime = (sec: number) => {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
-export default function ProcessingView({ files, log, batchStatus, onBack }: Props) {
+export default function ProcessingView({ onBack }: Props) {
+    const { taskList: files, log, batchStatus } = useJob();
+
     const logEndRef = useRef<HTMLDivElement>(null);
     const processingItemRef = useRef<HTMLDivElement>(null);
 
@@ -47,6 +47,9 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
         }
     }, [processingFileId]);
 
+    // フィルタリング: trash, exiftoolは隠す
+    const visibleFiles = files.filter(f => f.taskType !== 'trash' && f.taskType !== 'exiftool');
+
     let targetFile: MediaInfo | null = null;
     let targetStats: DashboardStats | null = null;
     // 終了予想時刻文字列
@@ -54,9 +57,10 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
 
     // 現在処理中のファイルを探す
     const processingFile = files.find(f => f.status === 'processing');
-
+    // 未完了タスクがあるかチェック (waiting, processing)
+    const hasActiveJob = files.some(f => f.status === 'processing' || f.status === 'waiting');
     // 全て完了しているか判定
-    const isAllDone = files.length > 0 && files.every(f => f.status === 'done');
+    const isJobFinished = files.length > 0 && !hasActiveJob;
 
     if (processingFile) {
         // 処理中
@@ -88,7 +92,8 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
 
             // 変換スピード (実時間に対する倍速) = 処理した動画時間 / かかった実時間
             // 処理した動画時間 = 総時間 * 進捗率
-            const processedDuration = processingFile.duration * (processingFile.progress / 100);
+            const timeScale = processingFile.timeScale || 1.0;
+            const processedDuration = (processingFile.duration / timeScale) * (processingFile.progress / 100);
             stats.speed = stats.elapsed > 0 ? processedDuration / stats.elapsed : 0;
 
             // 残り時間 = (100 - 進捗) / (進捗 / 経過時間)
@@ -102,37 +107,47 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
             }
         }
         targetStats = stats;
-    } else if (isAllDone) {
+    } else if (isJobFinished) {
         // 全完了
 
+        // 完了したタスク(convert/concat)のみを集計対象にする
+        const finishedTasks = files.filter(f => (f.taskType === 'convert' || f.taskType === 'concat') && f.status === 'done');
+
         // 合計値を計算
-        const totalOriginal = files.reduce((acc, f) => acc + f.size, 0);
-        const totalEncoded = files.reduce((acc, f) => acc + (f.encodedSize || 0), 0);
-        const totalDuration = files.reduce((acc, f) => acc + f.duration, 0); // 動画の総尺
+        const totalOriginal = finishedTasks.reduce((acc, f) => acc + f.size, 0);
+        const totalEncoded = finishedTasks.reduce((acc, f) => acc + (f.encodedSize || 0), 0);
+        const totalDuration = finishedTasks.reduce((acc, f) => {
+            const scale = f.timeScale || 1.0;
+            return acc + (f.duration / scale);
+        }, 0); // 動画の総尺
 
         // 実処理時間の合計 (各ファイルの処理時間の和)
-        const totalElapsed = files.reduce((acc, f) => {
+        const totalElapsed = finishedTasks.reduce((acc, f) => {
             if (f.startedAt && f.completedAt) return acc + (f.completedAt - f.startedAt);
             return acc;
         }, 0) / 1000;
 
+        const errorCount = files.filter(f => f.status === 'error').length;
+        const successCount = files.filter(f => f.status === 'done').length;
+
         // ダミーのMediaInfoを作成して完了画面を表現
         targetFile = {
             id: 'summary',
-            path: '👺 All Tasks Completed 👹', // これがタイトルになる
+            path: errorCount > 0 ? `Finished (${successCount} OK, ${errorCount} Failed)` : '👺 All Tasks Completed 👹', // これがタイトルになる
             size: totalOriginal,
             hasVideo: true,
             hasAudio: true,
             duration: totalDuration,
             status: 'done',
             progress: 100, // バーは満タン
-            encodedSize: totalEncoded
+            encodedSize: totalEncoded,
+            taskType: 'convert'
         };
 
         targetStats = {
             encodedSize: totalEncoded,
             predictedSize: totalEncoded, // 完了してるので予測=実績
-            reductionRate: ((totalOriginal - totalEncoded) / totalOriginal) * 100,
+            reductionRate: totalOriginal > 0 ? ((totalOriginal - totalEncoded) / totalOriginal) * 100 : 0,
             elapsed: totalElapsed,
             eta: 0,
             speed: totalElapsed > 0 ? totalDuration / totalElapsed : 0 // 平均倍速
@@ -160,7 +175,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
             {/* 進捗リスト */}
             <div className="flex-1 field-border overflow-y-auto p-2">
                 <div className="flex flex-col">
-                    {files.map((file, i) => {
+                    {visibleFiles.map((file, i) => {
                         const isProcessing = file.status === 'processing';
                         const isDone = file.status === 'done';
                         const isError = file.status === 'error';
@@ -170,7 +185,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
                                 key={i}
                                 ref={isProcessing ? processingItemRef : null}
                                 className={`
-                                    flex flex-col gap-1 px-2 py-1 status-field-border
+                                    flex flex-col gap-0 px-2 py-1 status-field-border
                                     ${isProcessing ? '!bg-[#000080] text-white' : 'text-black'}
                                 `}
                             >
@@ -252,7 +267,7 @@ export default function ProcessingView({ files, log, batchStatus, onBack }: Prop
             </div>
 
             <button className="oki-btn self-end" onClick={onBack}>
-                {isAllDone ? "Back to Setup" : "Cancel (Debug)"}
+                {isJobFinished ? "Back to Setup" : "Cancel (Debug)"}
             </button>
         </div>
     );

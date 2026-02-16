@@ -6,8 +6,32 @@ export function AnalyzeMedia(arg1) {
   return window['go']['main']['App']['AnalyzeMedia'](arg1);
 }
 
+export function CancelDelete(arg1) {
+  return window['go']['main']['App']['CancelDelete'](arg1);
+}
+
+export function CheckFileExists(arg1) {
+  return window['go']['main']['App']['CheckFileExists'](arg1);
+}
+
+export function ConfirmDelete(arg1) {
+  return window['go']['main']['App']['ConfirmDelete'](arg1);
+}
+
 export function ConvertVideo(arg1, arg2) {
   return window['go']['main']['App']['ConvertVideo'](arg1, arg2);
+}
+
+export function GetAvailableEncoders() {
+  return window['go']['main']['App']['GetAvailableEncoders']();
+}
+
+export function GetAvailableFormats() {
+  return window['go']['main']['App']['GetAvailableFormats']();
+}
+
+export function GetEncoderDefault(arg1) {
+  return window['go']['main']['App']['GetEncoderDefault'](arg1);
 }
 
 export function GetOSName() {
@@ -16,6 +40,22 @@ export function GetOSName() {
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function RequestDelete(arg1) {
+  return window['go']['main']['App']['RequestDelete'](arg1);
+}
+
+export function RunExifTool(arg1, arg2) {
+  return window['go']['main']['App']['RunExifTool'](arg1, arg2);
+}
+
+export function RunProcess(arg1) {
+  return window['go']['main']['App']['RunProcess'](arg1);
+}
+
+export function SelectVideoFiles() {
+  return window['go']['main']['App']['SelectVideoFiles']();
 }
 
 export function UploadChunk(arg1, arg2, arg3) {

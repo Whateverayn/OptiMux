@@ -12,7 +12,7 @@ export default function SplashScreen() {
                     <div className="title-bar-text">OptiMux Startup</div>
                 </div>
 
-                <div className="window-body flex-1 flex flex-col items-center justify-center gap-6 text-center py-8" style={{paddingBottom: "0px"}}>
+                <div className="window-body flex-1 flex flex-col items-center justify-center gap-6 text-center py-8" style={{ paddingBottom: "0px" }}>
 
                     {/* ロゴエリア */}
                     <div className="flex flex-col items-center">
@@ -20,7 +20,7 @@ export default function SplashScreen() {
                         <h1 className="text-3xl font-bold tracking-widest text-[#000080]" style={{ textShadow: "2px 2px 0px #ffffffff" }}>
                             OptiMux
                         </h1>
-                        <p className="text-sm font-bold text-gray-500">Version 1.0.0-rc1</p>
+                        <p className="text-sm font-bold text-gray-500">Version 1.1.0</p>
                     </div>
 
                     <ProgressBar duration={3} className="h-8"></ProgressBar>
